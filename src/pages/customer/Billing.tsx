@@ -418,7 +418,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
             </span>
           </h1>
           <p className="text-xs text-zinc-400">
-            Premium account credits, real-time node billing logs, live server subscriptions, and gold voucher redemptions.
+            {canFund ? 'Premium account credits, real-time node billing logs, live server subscriptions, and gold voucher redemptions.' : 'Your account credits, invoices and server subscriptions. Credits are added by the administrator.'}
           </p>
         </div>
 
@@ -430,12 +430,14 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
             <Server className="h-4 w-4 inline mr-2 text-amber-400" /> {deployOk ? 'Deploy Premium Instance' : 'Request a Server'}
           </button>
           
-          <button
-            onClick={() => (canFund ? setShowAddCreditsModal(true) : onNavigate('support'))}
-            className="px-5 py-2.5 rounded-xl font-extrabold text-xs text-zinc-950 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 hover:from-amber-400 hover:to-yellow-300 shadow-lg shadow-amber-500/10 flex items-center gap-2 transition-all duration-300 scale-100 hover:scale-[1.02]"
-          >
-            <PlusCircle className="h-4 w-4 text-zinc-950" /> {canFund ? 'Add Wallet Funds' : 'Ask Admin for Credits'}
-          </button>
+          {canFund && (
+            <button
+              onClick={() => setShowAddCreditsModal(true)}
+              className="px-5 py-2.5 rounded-xl font-extrabold text-xs text-zinc-950 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 hover:from-amber-400 hover:to-yellow-300 shadow-lg shadow-amber-500/10 flex items-center gap-2 transition-all duration-300 scale-100 hover:scale-[1.02]"
+            >
+              <PlusCircle className="h-4 w-4 text-zinc-950" /> Add Wallet Funds
+            </button>
+          )}
         </div>
       </div>
 
@@ -459,12 +461,14 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
           </div>
           <div className="flex items-center justify-between pt-2.5 border-t border-zinc-800 text-[11px] text-zinc-450 font-medium">
             <span>VIP Auto-Renew Ready</span>
-            <button
-              onClick={() => (canFund ? setShowAddCreditsModal(true) : onNavigate('support'))}
-              className="text-amber-400 hover:text-amber-300 font-extrabold flex items-center gap-0.5 transition"
-            >
-              {canFund ? 'Add Funds' : 'Ask admin for credits'} <ChevronRight className="h-3 w-3" />
-            </button>
+            {canFund && (
+              <button
+                onClick={() => setShowAddCreditsModal(true)}
+                className="text-amber-400 hover:text-amber-300 font-extrabold flex items-center gap-0.5 transition"
+              >
+                Add Funds <ChevronRight className="h-3 w-3" />
+              </button>
+            )}
           </div>
         </div>
 
