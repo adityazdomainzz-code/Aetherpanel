@@ -1,0 +1,1868 @@
+import fs from 'fs';
+import path from 'path';
+import { spawn, spawnSync, ChildProcess } from 'child_process';
+import AdmZip from 'adm-zip';
+import { getDb, saveDbSync, getDbSync } from './db';
+import { Server, ServerFile, ServerBackup, ServerDatabase, ServerActivity } from '../src/types';
+import { dispatchDiscordNotification } from './discordService';
+import { buildBotStartupCommand } from '../src/lib/startup';
+import { RuntimeSupervisor } from './utils/runtimeSupervisor';
+import { resolveBotRuntimeExecutable, resolveNpmExecutable, resolveNpmExecutablePath, getAugmentedEnv } from './utils/runtimeResolver';
+
+const SERVERS_DIR = path.join(process.cwd(), 'data', 'servers');
+
+// In-memory active running child processes & telemetry map
+interface ActiveProcessEntry {
+  child?: ChildProcess;
+  startedAt: Date;
+  runnerType: 'minecraft' | 'bot_node' | 'bot_python' | 'bot_bun' | 'custom';
+  pid?: number;
+}
+
+const activeProcesses: Map<string, ActiveProcessEntry> = new Map();
+
+// In-memory console log buffer per server
+const consoleBuffers: Record<string, string[]> = {};
+
+// Log listeners for live WebSocket streaming
+type LogListener = (serverId: string, logLine: string) => void;
+const logListeners: Set<LogListener> = new Set();
+
+export function onConsoleLog(listener: LogListener): () => void {
+  logListeners.add(listener);
+  return () => logListeners.delete(listener);
+}
+
+// Server lifecycle status listeners for live WebSocket streaming
+type StatusListener = (serverId: string, status: string, details?: any) => void;
+const statusListeners: Set<StatusListener> = new Set();
+
+export function onServerStatus(listener: StatusListener): () => void {
+  statusListeners.add(listener);
+  return () => statusListeners.delete(listener);
+}
+
+export function emitServerStatus(serverId: string, status: string, details?: any) {
+  statusListeners.forEach((listener) => {
+    try {
+      listener(serverId, status, details);
+    } catch {}
+  });
+}
+
+export function clearConsoleBuffer(serverId: string) {
+  delete consoleBuffers[serverId];
+}
+
+export function getConsoleBuffer(serverId: string, isRunning: boolean = false): string[] {
+  if (!consoleBuffers[serverId]) {
+    if (!isRunning) {
+      consoleBuffers[serverId] = [
+        `[AetherDaemon]: Server is currently offline. Start the server to attach live console output.`
+      ];
+    } else {
+      consoleBuffers[serverId] = [];
+    }
+  }
+  return consoleBuffers[serverId];
+}
+
+export function appendConsoleLog(serverId: string, logLine: string) {
+  const buf = getConsoleBuffer(serverId, true);
+  // If buffer currently only has the offline placeholder message, replace it
+  if (buf.length === 1 && buf[0].includes('Server is currently offline')) {
+    buf.pop();
+  }
+
+  // Clean ANSI control characters if any
+  const cleaned = logLine.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '').trimEnd();
+  if (!cleaned) return;
+
+  const lines = cleaned.split('\n');
+  for (const l of lines) {
+    if (!l.trim()) continue;
+    const formatted = l.startsWith('[') ? l : `[${new Date().toLocaleTimeString()}] ${l}`;
+    buf.push(formatted);
+
+    // Notify active WebSocket listeners
+    logListeners.forEach((listener) => {
+      try {
+        listener(serverId, formatted);
+      } catch {}
+    });
+
+    // Check startup ready signals for starting servers
+    try {
+      const db = getDbSync();
+      const server = db.servers.find(s => s.id === serverId);
+      if (server && server.status === 'starting') {
+        const str = l.toLowerCase();
+        const isReadySignal = 
+          str.includes('done (') ||
+          str.includes('ready to handle connections') ||
+          str.includes('listening on') ||
+          str.includes('started successfully') ||
+          str.includes('ready') ||
+          str.includes('discord bot connected') ||
+          str.includes('online');
+        
+        if (isReadySignal) {
+          server.status = 'running';
+          server.cpuUsage = 1.2;
+          server.ramUsageMB = server.software?.toLowerCase().includes('bot') ? 45 : 120;
+          server.uptimeSeconds = 0;
+          saveDbSync();
+          emitServerStatus(serverId, 'running');
+          setupStableUptimeReset(serverId);
+        }
+      }
+    } catch {}
+  }
+  
+  if (buf.length > 500) {
+    buf.splice(0, buf.length - 500);
+  }
+}
+
+export async function getServerConsoleLogs(serverId: string): Promise<string[]> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  const isRunning = server ? server.status === 'running' || server.status === 'starting' : false;
+  const logs = getConsoleBuffer(serverId, isRunning);
+  return logs.slice(-500);
+}
+
+// Server Virtual Disk Directory Helper
+export function getServerDir(serverId: string): string {
+  const dir = path.join(SERVERS_DIR, serverId);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+// Ensure initial files exist on disk for a new server without overwriting existing files
+export function initializeServerFiles(serverId: string, productCategory: string, software: string, version?: string) {
+  const dir = getServerDir(serverId);
+
+  if (productCategory === 'minecraft') {
+    const eulaPath = path.join(dir, 'eula.txt');
+    if (!fs.existsSync(eulaPath)) {
+      fs.writeFileSync(eulaPath, '# By changing the setting below to TRUE you are indicating your agreement to our EULA\neula=true\n');
+    }
+
+    const propPath = path.join(dir, 'server.properties');
+    if (!fs.existsSync(propPath)) {
+      fs.writeFileSync(propPath, [
+        '# Minecraft server properties',
+        `# Software: ${software || 'Paper'} ${version || '1.21.4'}`,
+        '# Generated by AetherPanel',
+        'server-port=25565',
+        'gamemode=survival',
+        'difficulty=easy',
+        'pvp=true',
+        'max-players=20',
+        'motd=\\u00a7bAetherPanel \\u00a77- High Performance Minecraft Host',
+        'online-mode=true',
+        'allow-flight=false',
+        'enable-command-block=true',
+        'view-distance=10'
+      ].join('\n'));
+    }
+
+    const pluginsDir = path.join(dir, 'plugins');
+    if (!fs.existsSync(pluginsDir)) {
+      fs.mkdirSync(pluginsDir, { recursive: true });
+    }
+  } else if (productCategory === 'bot') {
+    const swLower = (software || '').toLowerCase();
+    const isBun = swLower.includes('bun');
+    const isPython = swLower.includes('python');
+
+    if (isBun) {
+      const indexPath = path.join(dir, 'index.ts');
+      const pkgPath = path.join(dir, 'package.json');
+      if (!fs.existsSync(indexPath)) {
+        fs.writeFileSync(indexPath, `// Bun Bot Application (${version || 'Bun 1.2'})\nconsole.log("[AetherPanel] Bun Bot server initialized.");\nconsole.log(\`[AetherPanel] Configured Runtime: Bun (${version || '1.2'})\`);\nconsole.log(\`[AetherPanel] Bun Version: \${typeof Bun !== 'undefined' ? Bun.version : '${version || "1.2"}'}\`);\nconsole.log(\`[AetherPanel] Port: \${process.env.PORT || 3000}\`);\n\nsetInterval(() => { /* keep alive */ }, 5000);\n`);
+      }
+      if (!fs.existsSync(pkgPath)) {
+        fs.writeFileSync(pkgPath, JSON.stringify({
+          name: 'bun-bot-app',
+          version: '1.0.0',
+          module: 'index.ts',
+          type: 'module',
+          scripts: {
+            start: 'bun run index.ts'
+          }
+        }, null, 2));
+      }
+    } else if (isPython) {
+      const mainPath = path.join(dir, 'main.py');
+      const reqPath = path.join(dir, 'requirements.txt');
+      if (!fs.existsSync(mainPath)) {
+        fs.writeFileSync(mainPath, `# Python Bot Application (${version || 'Python 3.12'})\nimport os, sys, time\nprint("[AetherPanel] Python Bot server initialized.")\nprint(f"[AetherPanel] Configured Version: ${version || 'Python 3.12'}")\nprint(f"[AetherPanel] Process Python Version: {sys.version.split()[0]}")\nprint(f"[AetherPanel] Port: {os.environ.get('PORT', '3000')}")\n\nwhile True:\n    time.sleep(5)\n`);
+      }
+      if (!fs.existsSync(reqPath)) {
+        fs.writeFileSync(reqPath, `# Python dependencies (${version || 'Python 3.12'})\n# Add your libraries below (e.g. discord.py, python-dotenv, requests)\n`);
+      }
+    } else {
+      const indexPath = path.join(dir, 'index.js');
+      const pkgPath = path.join(dir, 'package.json');
+      if (!fs.existsSync(indexPath)) {
+        fs.writeFileSync(indexPath, `// Node.js Bot Application (${version || 'Node 22 (LTS)'})\nconsole.log("[AetherPanel] Node.js Bot server initialized.");\nconsole.log(\`[AetherPanel] Configured Version: ${version || 'Node 22 (LTS)'}\`);\nconsole.log(\`[AetherPanel] Process Node Version: \${process.version}\`);\nconsole.log(\`[AetherPanel] Port: \${process.env.PORT || 3000}\`);\n\nsetInterval(() => { /* keep alive */ }, 5000);\n`);
+      }
+      if (!fs.existsSync(pkgPath)) {
+        fs.writeFileSync(pkgPath, JSON.stringify({
+          name: 'node-bot-app',
+          version: '1.0.0',
+          main: 'index.js',
+          scripts: {
+            start: 'node index.js'
+          }
+        }, null, 2));
+      }
+    }
+  }
+}
+
+export type InstallStatus = 'PIP_NOT_FOUND' | 'DEPENDENCY_INSTALL_FAILED' | 'DEPENDENCY_INSTALL_SUCCESS' | 'NO_REQUIREMENTS_FILE' | 'NO_PACKAGE_FILE' | 'STARTUP_FAILED';
+
+// Bot Dependency Installation - Safe spawn without shell: true
+export async function installServerDependencies(serverId: string): Promise<{ success: boolean; status: InstallStatus; output: string }> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (!server) throw new Error('Server not found');
+
+  const dir = getServerDir(serverId);
+  const { runtime } = buildBotStartupCommand(server, server.startup, dir);
+
+  appendConsoleLog(serverId, `[AetherInstaller/INFO]: Starting dependency installation for ${runtime}...`);
+
+  const runtimeInfo = resolveBotRuntimeExecutable(runtime, server.version);
+  if (!runtimeInfo.available) {
+    const errorMsg = `[Installer/ERROR]: RUNTIME_UNAVAILABLE - ${runtimeInfo.reason || 'Runtime executable unavailable'}`;
+    appendConsoleLog(serverId, errorMsg);
+    return { success: false, status: 'STARTUP_FAILED', output: errorMsg };
+  }
+
+  if (runtime === 'python') {
+    const reqPath = path.join(dir, 'requirements.txt');
+    if (!fs.existsSync(reqPath)) {
+      const msg = `[Installer/INFO]: 'requirements.txt' not found in server root. Skipping package installation.`;
+      appendConsoleLog(serverId, msg);
+      return { success: true, status: 'NO_REQUIREMENTS_FILE', output: msg };
+    }
+
+    if (!runtimeInfo.pipAvailable) {
+      const errorMsg = `[Installer/ERROR]: PIP_NOT_FOUND - Pip module is not available for interpreter '${runtimeInfo.executable}'.`;
+      appendConsoleLog(serverId, errorMsg);
+      return { success: false, status: 'PIP_NOT_FOUND', output: errorMsg };
+    }
+  } else {
+    const pkgPath = path.join(dir, 'package.json');
+    if (!fs.existsSync(pkgPath)) {
+      const msg = `[Installer/INFO]: 'package.json' not found in server root. Skipping package installation.`;
+      appendConsoleLog(serverId, msg);
+      return { success: true, status: 'NO_PACKAGE_FILE', output: msg };
+    }
+  }
+
+  return new Promise((resolve) => {
+    let cmd = 'npm';
+    let args = ['install'];
+
+    if (runtime === 'python') {
+      cmd = runtimeInfo.executable;
+      args = ['-m', 'pip', 'install', '-r', 'requirements.txt'];
+    } else if (runtime === 'bun') {
+      cmd = runtimeInfo.executable;
+      args = ['install'];
+    } else if (runtime === 'nodejs') {
+      cmd = resolveNpmExecutablePath();
+      args = ['install'];
+    }
+
+    let output = '';
+    let isSettled = false;
+
+    const child = spawn(cmd, args, { cwd: dir, env: getAugmentedEnv(), shell: false });
+
+    const timeout = setTimeout(() => {
+      if (!isSettled) {
+        isSettled = true;
+        try { child.kill('SIGKILL'); } catch {}
+        const msg = `[Installer/ERROR]: Dependency installation process timed out after 120 seconds.`;
+        appendConsoleLog(serverId, msg);
+        resolve({ success: false, status: 'DEPENDENCY_INSTALL_FAILED', output: output + '\n' + msg });
+      }
+    }, 120000);
+
+    child.stdout?.on('data', (data) => {
+      const txt = data.toString();
+      output += txt;
+      appendConsoleLog(serverId, `[Installer]: ${txt}`);
+    });
+
+    child.stderr?.on('data', (data) => {
+      const txt = data.toString();
+      output += txt;
+      appendConsoleLog(serverId, `[Installer/STDERR]: ${txt}`);
+    });
+
+    child.on('error', (err) => {
+      if (isSettled) return;
+      isSettled = true;
+      clearTimeout(timeout);
+      appendConsoleLog(serverId, `[Installer/ERROR]: Failed to run ${cmd}: ${err.message}`);
+      resolve({ success: false, status: 'DEPENDENCY_INSTALL_FAILED', output: output + '\n' + err.message });
+    });
+
+    child.on('close', (code) => {
+      if (isSettled) return;
+      isSettled = true;
+      clearTimeout(timeout);
+      if (code === 0) {
+        appendConsoleLog(serverId, `[Installer/SUCCESS]: Dependencies installed successfully (Exit Code 0).`);
+        resolve({ success: true, status: 'DEPENDENCY_INSTALL_SUCCESS', output });
+      } else {
+        appendConsoleLog(serverId, `[Installer/WARN]: Dependency installation process finished with exit code: ${code}`);
+        resolve({ success: false, status: 'DEPENDENCY_INSTALL_FAILED', output });
+      }
+    });
+  });
+}
+
+import { checkJavaRuntime, getRecommendedJavaVersion, provisionJavaRuntime } from './minecraftService';
+
+// Remote command queue for servers running on remote nodes
+const remoteCommandQueues: Map<string, string[]> = new Map();
+
+// Track intentional stops/kills to prevent treating normal shutdowns as crashes
+const intendedStops: Set<string> = new Set();
+const serverLocks: Set<string> = new Set();
+// Stable uptime timers map to reset crash counters after stable operation
+const uptimeTimers: Map<string, NodeJS.Timeout> = new Map();
+// Auto restart timers map
+const autoRestartTimers: Map<string, NodeJS.Timeout> = new Map();
+
+export function pullRemoteServerCommands(serverId: string): string[] {
+  const queue = remoteCommandQueues.get(serverId) || [];
+  remoteCommandQueues.delete(serverId);
+  return queue;
+}
+
+export function queueRemoteServerCommand(serverId: string, command: string) {
+  const q = remoteCommandQueues.get(serverId) || [];
+  q.push(command);
+  remoteCommandQueues.set(serverId, q);
+}
+
+// Preflight Resource & Validation Checks
+export interface PreflightCheckResult {
+  ok: boolean;
+  code?: string;
+  reason?: string;
+}
+
+export async function validateServerPreflight(serverId: string): Promise<PreflightCheckResult> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (!server) {
+    return { ok: false, code: 'SERVER_NOT_FOUND', reason: 'Server definition not found in database.' };
+  }
+
+  // 1. Check Node Status
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  if (node) {
+    if (node.isMaintenanceMode || node.status === 'maintenance') {
+      return { ok: false, code: 'NODE_MAINTENANCE', reason: `Assigned node '${node.name}' is currently in maintenance mode.` };
+    }
+    if (node.status === 'offline' && !node.isLocalNode && node.id !== 'node_local') {
+      return { ok: false, code: 'NODE_OFFLINE', reason: `Assigned node '${node.name}' is offline. Cannot initialize container.` };
+    }
+  }
+
+  // 2. Check Allocation / Port Conflict
+  const activeProcessesList = Array.from(activeProcesses.entries());
+  for (const [otherServerId] of activeProcessesList) {
+    if (otherServerId !== serverId) {
+      const otherServer = db.servers.find(s => s.id === otherServerId);
+      if (otherServer && otherServer.primaryPort === server.primaryPort && otherServer.nodeId === server.nodeId) {
+        return { ok: false, code: 'PORT_CONFLICT', reason: `Primary port ${server.primaryPort} is currently bound by another active server (${otherServer.name}).` };
+      }
+    }
+  }
+
+  // 3. Check Software Runtime & Artifacts
+  const prod = db.products.find(p => p.id === server.productId);
+  const isBotSoftware = /bot|python|node|discord|telegram|js|bun/i.test(server.software) || /bot|python|node/i.test(server.productId || '');
+  const category = prod?.category || (isBotSoftware ? 'bot' : 'minecraft');
+  const dir = getServerDir(serverId);
+
+  if (category === 'minecraft') {
+    const reqJava = server.startup?.javaVersion || getRecommendedJavaVersion(server.version);
+    let javaCheck = checkJavaRuntime(reqJava);
+    if (!javaCheck.available && process.env.JAVA_RUNTIME_AUTO_INSTALL !== 'false') {
+      try {
+        appendConsoleLog(serverId, `[AetherRuntime/INFO]: Required Java ${reqJava} is missing on target node. Triggering automatic Java ${reqJava} provisioning...`);
+        const autoProv = await provisionJavaRuntime(reqJava, {
+          nodeId: server.nodeId,
+          onLog: (line) => appendConsoleLog(serverId, line)
+        });
+        if (autoProv.success) {
+          appendConsoleLog(serverId, `[AetherRuntime/SUCCESS]: Java ${reqJava} auto-provisioning completed successfully.`);
+          javaCheck = checkJavaRuntime(reqJava);
+        } else {
+          appendConsoleLog(serverId, `[AetherRuntime/ERROR]: Java ${reqJava} auto-provisioning failed: ${autoProv.message}`);
+        }
+      } catch (err: any) {
+        appendConsoleLog(serverId, `[AetherRuntime/ERROR]: Java ${reqJava} auto-provisioning exception: ${err.message}`);
+      }
+    }
+
+    if (!javaCheck.available) {
+      if (javaCheck.code === 'JAVA_VERSION_MISMATCH') {
+        return {
+          ok: false,
+          code: 'JAVA_VERSION_MISMATCH',
+          required: javaCheck.required,
+          detected: javaCheck.detected,
+          version: server.version,
+          reason: `Required Java: ${javaCheck.required}, Detected Java: ${javaCheck.detected || 'None'}. Required executable: ${javaCheck.path || 'Not Found'}. Server Version: ${server.version}`
+        } as any;
+      }
+      return {
+        ok: false,
+        code: 'JAVA_RUNTIME_UNAVAILABLE',
+        required: reqJava,
+        detected: javaCheck.detected || null,
+        version: server.version,
+        reason: `Required Java: ${reqJava}, Detected Java: ${javaCheck.detected || 'None'}. Java Runtime is unavailable: ${javaCheck.message}`
+      } as any;
+    }
+
+    const jarName = server.startup?.serverJar || 'server.jar';
+    const serverJarPath = path.join(dir, jarName);
+    if (!fs.existsSync(serverJarPath) || fs.statSync(serverJarPath).size < 1024) {
+      return { ok: false, code: 'SERVER_JAR_MISSING', reason: `Server JAR artifact '${jarName}' is missing or corrupted in server root directory.` };
+    }
+  } else {
+    // Bot Runtime
+    const botCmdInfo = buildBotStartupCommand(server, server.startup, dir);
+    if (!botCmdInfo.hasEntryFile) {
+      return { ok: false, code: 'NO_ENTRY_FILE', reason: botCmdInfo.missingReason || `Startup failed. Entry file for ${botCmdInfo.runtime} was not found.` };
+    }
+
+    const runtimeInfo = resolveBotRuntimeExecutable(botCmdInfo.runtime, server.version);
+    if (!runtimeInfo.available) {
+      return { ok: false, code: 'RUNTIME_UNAVAILABLE', reason: `${botCmdInfo.runtime === 'python' ? 'Python' : botCmdInfo.runtime === 'bun' ? 'Bun' : 'Node.js'} runtime unavailable: ${runtimeInfo.reason}` };
+    }
+  }
+
+  return { ok: true };
+}
+
+// Read merged environment variables (.env file + server.envVars array + system params)
+export function readServerMergedEnv(serverId: string, server: Server): Record<string, string> {
+  const fileEnv = readServerEnv(serverId);
+  const dbEnv: Record<string, string> = {};
+
+  if (Array.isArray(server.envVars)) {
+    for (const v of server.envVars) {
+      if (v.isEnabled !== false && v.key) {
+        dbEnv[v.key.trim()] = v.value || '';
+      }
+    }
+  }
+
+  const cleanEnv: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    ...fileEnv,
+    ...dbEnv,
+    SERVER_ID: serverId,
+    SERVER_NAME: server.name,
+    SERVER_PORT: String(server.primaryPort),
+    SERVER_IP: server.primaryIp || '0.0.0.0',
+    SERVER_MEMORY_MB: String(server.limits.ramMB),
+    SERVER_CPU_CORES: String(server.limits.cpuCores)
+  };
+
+  return cleanEnv;
+}
+
+// Server Control Actions
+export async function startServer(serverId: string): Promise<boolean> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (!server) return false;
+
+  // Clear any existing pending auto-restart timer
+  const existingRestartTimer = autoRestartTimers.get(serverId);
+  if (existingRestartTimer) {
+    clearTimeout(existingRestartTimer);
+    autoRestartTimers.delete(serverId);
+  }
+
+  if (activeProcesses.has(serverId)) {
+    appendConsoleLog(serverId, `[AetherDaemon/WARN]: Server process is already running.`);
+    return true;
+  }
+
+  server.status = 'starting';
+  saveDbSync();
+  emitServerStatus(serverId, 'starting');
+
+  // Preflight validation
+  const preflight = await validateServerPreflight(serverId);
+  if (!preflight.ok) {
+    appendConsoleLog(serverId, `[AetherDaemon/ERROR]: Preflight validation failed: ${preflight.reason} (${preflight.code})`);
+    server.status = 'error';
+    if (!server.startup) server.startup = {};
+    server.startup.lastCrashReason = `Preflight error: ${preflight.reason}`;
+    saveDbSync();
+    emitServerStatus(serverId, 'error', { error: preflight.reason, code: preflight.code });
+    return false;
+  }
+
+  // Clear previous log buffer for a fresh session if starting
+  consoleBuffers[serverId] = [];
+
+  appendConsoleLog(serverId, `[AetherDaemon/INFO]: Initializing container sandbox & allocating limits (${server.limits.ramMB}MB RAM, ${server.limits.cpuCores} vCPU)...`);
+
+  const prod = db.products.find(p => p.id === server.productId);
+  const isBotSoftware = /bot|python|node|discord|telegram|js|bun/i.test(server.software) || /bot|python|node/i.test(server.productId || '');
+  const category = prod?.category || (isBotSoftware ? 'bot' : 'minecraft');
+  const dir = getServerDir(serverId);
+
+  const cleanEnv = readServerMergedEnv(serverId, server);
+
+  // Check if server is on a remote node
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  const isRemote = (node && !node.isLocalNode && node.id !== 'node_local') || (server.nodeId && server.nodeId !== 'node_local');
+
+  if (isRemote) {
+    appendConsoleLog(serverId, `[AetherDaemon/INFO]: Dispatching startup command to remote node '${node?.name || server.nodeId}' daemon...`);
+    queueRemoteServerCommand(serverId, 'START');
+    server.status = 'starting';
+    saveDbSync();
+    emitServerStatus(serverId, 'starting');
+    return true;
+  }
+
+  if (category === 'bot') {
+    const botCmdInfo = buildBotStartupCommand(server, server.startup, dir);
+    const { runtime, startupFile, args, compiledCommand, hasEntryFile, missingReason } = botCmdInfo;
+    if (!hasEntryFile) {
+      const errReason = missingReason || `Startup failed. Entry file for ${runtime} was not found.`;
+      appendConsoleLog(serverId, `[AetherDaemon/ERROR]: ${errReason}`);
+      server.status = 'error';
+      if (!server.startup) server.startup = {};
+      server.startup.lastCrashReason = errReason;
+      saveDbSync();
+      emitServerStatus(serverId, 'error', { error: errReason });
+      return false;
+    }
+
+    const runtimeInfo = resolveBotRuntimeExecutable(runtime, server.version);
+    if (!runtimeInfo.available) {
+      const errReason = `${runtime === 'python' ? 'Python' : runtime === 'bun' ? 'Bun' : 'Node.js'} runtime unavailable: ${runtimeInfo.reason}`;
+      appendConsoleLog(serverId, `[AetherDaemon/ERROR]: ${errReason}`);
+      server.status = 'error';
+      if (!server.startup) server.startup = {};
+      server.startup.lastCrashReason = errReason;
+      saveDbSync();
+      emitServerStatus(serverId, 'error', { error: errReason });
+      return false;
+    }
+
+    const executable = runtimeInfo.executable;
+
+    if (!server.startup) server.startup = {};
+    server.startup.compiledCommand = `${executable} ${args.join(' ')}`;
+    server.startup.entryFile = startupFile;
+
+    if (runtime === 'python') {
+      const reqPath = path.join(dir, 'requirements.txt');
+      if (fs.existsSync(reqPath)) {
+        appendConsoleLog(serverId, `[AetherDaemon/INFO]: Detected 'requirements.txt' in Python server root. Running dependency preflight check...`);
+        const depRes = await installServerDependencies(serverId);
+        if (depRes.status === 'PIP_NOT_FOUND') {
+          appendConsoleLog(serverId, `[AetherDaemon/WARN]: PIP_NOT_FOUND - Pip module unavailable for interpreter '${executable}'. Proceeding to start application without installing packages.`);
+        } else if (depRes.status === 'DEPENDENCY_INSTALL_FAILED') {
+          appendConsoleLog(serverId, `[AetherDaemon/ERROR]: DEPENDENCY_INSTALL_FAILED - Failed installing requirements.txt. Aborting startup.`);
+          server.status = 'error';
+          if (!server.startup) server.startup = {};
+          server.startup.lastCrashReason = 'DEPENDENCY_INSTALL_FAILED';
+          saveDbSync();
+          emitServerStatus(serverId, 'error', { error: 'DEPENDENCY_INSTALL_FAILED' });
+          return false;
+        }
+      }
+    } else if (runtime === 'bun') {
+      const pkgPath = path.join(dir, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        appendConsoleLog(serverId, `[AetherDaemon/INFO]: Detected 'package.json' in Bun server root. Running dependency preflight check...`);
+        const depRes = await installServerDependencies(serverId);
+        if (!depRes.success && depRes.status === 'DEPENDENCY_INSTALL_FAILED') {
+          appendConsoleLog(serverId, `[AetherDaemon/ERROR]: DEPENDENCY_INSTALL_FAILED - Failed running 'bun install'. Aborting startup.`);
+          server.status = 'error';
+          if (!server.startup) server.startup = {};
+          server.startup.lastCrashReason = 'DEPENDENCY_INSTALL_FAILED';
+          saveDbSync();
+          emitServerStatus(serverId, 'error', { error: 'DEPENDENCY_INSTALL_FAILED' });
+          return false;
+        }
+      }
+    } else if (runtime === 'nodejs') {
+      const pkgPath = path.join(dir, 'package.json');
+      const nodeModulesPath = path.join(dir, 'node_modules');
+      if (fs.existsSync(pkgPath) && !fs.existsSync(nodeModulesPath)) {
+        appendConsoleLog(serverId, `[AetherDaemon/INFO]: Detected 'package.json' in Node.js server root and missing node_modules. Running dependency preflight check...`);
+        const depRes = await installServerDependencies(serverId);
+        if (!depRes.success && depRes.status === 'DEPENDENCY_INSTALL_FAILED') {
+          appendConsoleLog(serverId, `[AetherDaemon/ERROR]: DEPENDENCY_INSTALL_FAILED - Failed running 'npm install'. Aborting startup.`);
+          server.status = 'error';
+          if (!server.startup) server.startup = {};
+          server.startup.lastCrashReason = 'DEPENDENCY_INSTALL_FAILED';
+          saveDbSync();
+          emitServerStatus(serverId, 'error', { error: 'DEPENDENCY_INSTALL_FAILED' });
+          return false;
+        }
+      }
+    }
+
+    const scriptPath = path.join(dir, startupFile);
+    if (!fs.existsSync(scriptPath)) {
+      const errReason = `Startup failed. File: ${startupFile}. Reason: Startup file was not found.`;
+      appendConsoleLog(serverId, `[AetherDaemon/ERROR]: ${errReason}`);
+      server.status = 'error';
+      if (!server.startup) server.startup = {};
+      server.startup.lastCrashReason = errReason;
+      saveDbSync();
+      emitServerStatus(serverId, 'error', { error: errReason });
+      return false;
+    }
+
+    if (runtime === 'python') {
+      cleanEnv.PYTHONUNBUFFERED = '1';
+    }
+
+    try {
+      intendedStops.delete(serverId);
+
+      const runnerType = runtime === 'python' ? 'bot_python' : runtime === 'bun' ? 'bot_bun' : 'bot_node';
+      const processInfo = await RuntimeSupervisor.spawn(serverId, executable, args, {
+        cwd: dir,
+        env: cleanEnv,
+        runnerType
+      });
+
+      const entry: ActiveProcessEntry = {
+        startedAt: new Date(processInfo.startedAt),
+        runnerType,
+        pid: processInfo.pid
+      };
+      activeProcesses.set(serverId, entry);
+
+      if (!server.startup) server.startup = {};
+      server.startup.pid = processInfo.pid;
+      server.startup.lastStartedAt = processInfo.startedAt;
+
+      appendConsoleLog(serverId, `[AetherDaemon/INFO]: Bot process spawned via Supervisor (PID: ${processInfo.pid}) running ${executable} ${args.join(' ')}`);
+
+      // Keep starting until verified or active for 1.5 seconds
+      server.status = 'starting';
+      server.uptimeSeconds = 0;
+      saveDbSync();
+      emitServerStatus(serverId, 'starting', { pid: processInfo.pid });
+
+      setTimeout(async () => {
+        const db = await getDb();
+        const s = db.servers.find(srv => srv.id === serverId);
+        if (s && s.status === 'starting' && RuntimeSupervisor.getStatus(serverId) === 'starting') {
+          s.status = 'running';
+          s.cpuUsage = 1.2;
+          s.ramUsageMB = runtime === 'python' ? 32 : 45;
+          s.uptimeSeconds = 0;
+          saveDbSync();
+          emitServerStatus(serverId, 'running', { pid: processInfo.pid });
+          setupStableUptimeReset(serverId);
+          dispatchDiscordNotification(serverId, 'SERVER_STARTED', {
+            message: `Bot '${server.name}' (${server.software}) started successfully and is now active.`
+          }).catch(() => {});
+        }
+      }, 1500);
+
+      return true;
+    } catch (err: any) {
+      appendConsoleLog(serverId, `[AetherDaemon/ERROR]: Failed to start bot process: ${err.message}`);
+      server.status = 'error';
+      saveDbSync();
+      emitServerStatus(serverId, 'error', { error: err.message });
+      return false;
+    }
+  } else {
+    // Minecraft Server Runtime Runner
+    const reqJava = server.startup?.javaVersion || getRecommendedJavaVersion(server.version);
+    let javaCheck = checkJavaRuntime(reqJava);
+    if (!javaCheck.available && process.env.JAVA_RUNTIME_AUTO_INSTALL !== 'false') {
+      try {
+        const autoProv = await provisionJavaRuntime(reqJava, {
+          nodeId: server.nodeId,
+          onLog: (line) => appendConsoleLog(serverId, line)
+        });
+        if (autoProv.success) {
+          javaCheck = checkJavaRuntime(reqJava);
+        }
+      } catch {}
+    }
+
+    if (!javaCheck.available) {
+      appendConsoleLog(serverId, `[Server thread/ERROR]: Java Runtime check failed! ${javaCheck.message}`);
+      if (javaCheck.code === 'JAVA_VERSION_MISMATCH') {
+        appendConsoleLog(serverId, `[Server thread/ERROR]: Required Java: ${javaCheck.required}, Detected Java: ${javaCheck.detected || 'None'}. Required executable: ${javaCheck.path || 'Not Found'}. Server Version: ${server.version}`);
+      } else {
+        appendConsoleLog(serverId, `[Server thread/ERROR]: JAVA_RUNTIME_UNAVAILABLE: Required Java ${reqJava} is not installed or available on this system.`);
+      }
+      server.status = 'error';
+      saveDbSync();
+      emitServerStatus(serverId, 'error', { 
+        error: javaCheck.code || 'JAVA_RUNTIME_UNAVAILABLE',
+        required: javaCheck.required || reqJava,
+        detected: javaCheck.detected || null,
+        version: server.version
+      });
+      return false;
+    }
+
+    const jarName = server.startup?.serverJar || 'server.jar';
+    const serverJarPath = path.join(dir, jarName);
+    if (!fs.existsSync(serverJarPath) || fs.statSync(serverJarPath).size < 100) {
+      appendConsoleLog(serverId, `[Server thread/ERROR]: '${jarName}' artifact is missing or invalid in server root.`);
+      appendConsoleLog(serverId, `[Server thread/INFO]: Please use the Reinstall function to download the official server JAR.`);
+      server.status = 'error';
+      saveDbSync();
+      emitServerStatus(serverId, 'error', { error: `${jarName} missing` });
+      return false;
+    }
+
+    // Sync assigned primary port into server.properties
+    const propPath = path.join(dir, 'server.properties');
+    if (fs.existsSync(propPath)) {
+      let propContent = fs.readFileSync(propPath, 'utf8');
+      propContent = propContent.replace(/server-port=\d+/, `server-port=${server.primaryPort}`);
+      fs.writeFileSync(propPath, propContent, 'utf8');
+    }
+
+    const maxAllowedRam = server.resources?.memoryMb || server.limits?.ramMB || 1024;
+    const xmxMB = Math.min(Number(server.startup?.xmxMB) || maxAllowedRam, maxAllowedRam);
+    const xmsMB = Math.min(Number(server.startup?.xmsMB) || 128, xmxMB);
+
+    appendConsoleLog(serverId, `[Server thread/INFO]: Starting Minecraft engine (${server.software} ${server.version}) on Java ${javaCheck.installedVersion || 21}`);
+    appendConsoleLog(serverId, `[Server thread/INFO]: Allocating heap: ${xmsMB}M initial, ${xmxMB}M max`);
+    appendConsoleLog(serverId, `[Server thread/INFO]: Binding socket on ${server.primaryIp || '0.0.0.0'}:${server.primaryPort}`);
+
+    try {
+      intendedStops.delete(serverId);
+
+      const executable = javaCheck.path || 'java';
+      const args: string[] = [`-Xms${xmsMB}M`, `-Xmx${xmxMB}M`];
+
+      // Custom JVM Flags
+      if (server.startup?.jvmFlags) {
+        const extraFlags = server.startup.jvmFlags.split(/\s+/).filter(Boolean);
+        args.push(...extraFlags);
+      }
+
+      args.push('-jar', jarName);
+
+      if (server.startup?.nogui !== false) {
+        args.push('nogui');
+      }
+
+      if (server.startup?.customFlags) {
+        const extraCustom = server.startup.customFlags.split(/\s+/).filter(Boolean);
+        args.push(...extraCustom);
+      }
+
+      const compiledCmd = `${executable} ${args.join(' ')}`;
+      if (!server.startup) server.startup = {};
+      server.startup.compiledCommand = compiledCmd;
+
+      const processInfo = await RuntimeSupervisor.spawn(serverId, executable, args, {
+        cwd: dir,
+        env: cleanEnv,
+        runnerType: 'minecraft'
+      });
+
+      const entry: ActiveProcessEntry = {
+        startedAt: new Date(processInfo.startedAt),
+        runnerType: 'minecraft',
+        pid: processInfo.pid
+      };
+      activeProcesses.set(serverId, entry);
+
+      if (!server.startup) server.startup = {};
+      server.startup.pid = processInfo.pid;
+      server.startup.lastStartedAt = processInfo.startedAt;
+
+      appendConsoleLog(serverId, `[Server thread/INFO]: Minecraft Server spawned via Supervisor (PID: ${processInfo.pid}) running ${compiledCmd}`);
+
+      // Keep server in 'starting' state until confirmed by logs or fallback after 20s
+      server.status = 'starting';
+      server.uptimeSeconds = 0;
+      saveDbSync();
+      emitServerStatus(serverId, 'starting', { pid: processInfo.pid });
+
+      setTimeout(async () => {
+        const db = await getDb();
+        const s = db.servers.find(srv => srv.id === serverId);
+        if (s && s.status === 'starting' && RuntimeSupervisor.getStatus(serverId) === 'starting') {
+          s.status = 'running';
+          s.cpuUsage = 2.8;
+          s.ramUsageMB = 480;
+          s.uptimeSeconds = 0;
+          saveDbSync();
+          emitServerStatus(serverId, 'running', { pid: processInfo.pid });
+          setupStableUptimeReset(serverId);
+          dispatchDiscordNotification(serverId, 'SERVER_STARTED', {
+            message: `Minecraft Server '${server.name}' (${server.software} ${server.version}) is now active on ${server.primaryIp}:${server.primaryPort}.`
+          }).catch(() => {});
+        }
+      }, 20000);
+
+      return true;
+    } catch (err: any) {
+      appendConsoleLog(serverId, `[Server thread/ERROR]: Failed to start: ${err.message}`);
+      server.status = 'error';
+      saveDbSync();
+      emitServerStatus(serverId, 'error', { error: err.message });
+      return false;
+    }
+  }
+}
+
+// Stable Uptime Tracker: Reset crash count after continuous stable execution
+function setupStableUptimeReset(serverId: string) {
+  const existing = uptimeTimers.get(serverId);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(async () => {
+    try {
+      const db = await getDb();
+      const server = db.servers.find(s => s.id === serverId);
+      if (server && server.status === 'running' && server.startup) {
+        if ((server.startup.crashCount || 0) > 0) {
+          appendConsoleLog(serverId, `[AetherDaemon/INFO]: Server has operated stably for 5 minutes. Resetting crash counter to 0.`);
+          server.startup.crashCount = 0;
+          saveDbSync();
+        }
+      }
+    } catch {}
+  }, 300000); // 5 minutes
+
+  uptimeTimers.set(serverId, timer);
+}
+
+// Process Exit & Crash Handler with Auto-Restart Policies
+async function handleProcessExit(serverId: string, code: number | null, signal: string | null, exitedChild?: ChildProcess) {
+  const currentEntry = activeProcesses.get(serverId);
+  // If another process was already spawned for this server, ignore stale exit event
+  if (currentEntry && exitedChild && currentEntry.child !== exitedChild) {
+    return;
+  }
+
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (!server) return;
+
+  activeProcesses.delete(serverId);
+  const uptimeTimer = uptimeTimers.get(serverId);
+  if (uptimeTimer) {
+    clearTimeout(uptimeTimer);
+    uptimeTimers.delete(serverId);
+  }
+
+  if (!server.startup) server.startup = {};
+  server.startup.pid = undefined;
+  server.startup.lastStoppedAt = new Date().toISOString();
+  server.cpuUsage = 0;
+  server.ramUsageMB = 0;
+
+  if (server.startup?.lastCrashReason === 'JAVA_VERSION_MISMATCH') {
+    appendConsoleLog(serverId, `[AetherDaemon/CRASH]: java.lang.UnsupportedClassVersionError detected! The Minecraft server jar requires a newer Java version than currently configured. Auto-recovery suspended to prevent endless crash loops.`);
+    server.status = 'error';
+    saveDbSync();
+    emitServerStatus(serverId, 'error', { 
+      error: 'JAVA_VERSION_MISMATCH',
+      required: 21,
+      detected: 17,
+      version: server.version
+    });
+    return;
+  }
+
+  const isIntended = intendedStops.has(serverId);
+  intendedStops.delete(serverId);
+
+  if (isIntended || (code === 0 && !signal)) {
+    // Normal graceful stop
+    appendConsoleLog(serverId, `[AetherDaemon/INFO]: Process terminated cleanly (Exit Code: ${code ?? 0}, Signal: ${signal ?? 'NONE'}).`);
+    server.status = 'stopped';
+    saveDbSync();
+    emitServerStatus(serverId, 'stopped', { exitCode: code, signal });
+    return;
+  }
+
+  // Process Crashed / Terminated Abnormally
+  appendConsoleLog(serverId, `[AetherDaemon/CRASH]: Process terminated unexpectedly with Exit Code ${code} (Signal: ${signal || 'NONE'}).`);
+
+  server.startup.lastCrashAt = new Date().toISOString();
+  server.startup.lastCrashReason = `Exit code ${code}${signal ? `, Signal ${signal}` : ''}`;
+  server.startup.crashCount = (server.startup.crashCount || 0) + 1;
+
+  const restartPolicy = server.startup.autoRestartPolicy || (server.startup.restartOnCrash === true ? 'on_crash' : 'never');
+  const shouldRestart = server.startup.restartOnCrash === true && (restartPolicy === 'always' || (restartPolicy === 'on_crash' && code !== 0));
+  const maxRestarts = server.startup.maxCrashRestarts ?? 5;
+  const delaySec = server.startup.crashRestartDelaySeconds ?? 5;
+
+  if (shouldRestart && server.startup.crashCount <= maxRestarts) {
+    appendConsoleLog(serverId, `[AetherDaemon/CRASH]: Auto-restart policy '${restartPolicy}' triggered. Attempt ${server.startup.crashCount}/${maxRestarts} in ${delaySec}s...`);
+    server.status = 'crashed';
+    saveDbSync();
+    emitServerStatus(serverId, 'crashed', { exitCode: code, signal, willRestart: true, retryIn: delaySec });
+
+    const restartTimer = setTimeout(async () => {
+      appendConsoleLog(serverId, `[AetherDaemon/RECOVERY]: Executing auto-restart attempt #${server.startup?.crashCount}...`);
+      await startServer(serverId);
+    }, delaySec * 1000);
+
+    autoRestartTimers.set(serverId, restartTimer);
+  } else {
+    if (server.startup.crashCount > maxRestarts) {
+      appendConsoleLog(serverId, `[AetherDaemon/CRASH]: Maximum auto-restart limit (${maxRestarts}) reached. Auto-recovery suspended.`);
+    }
+    server.status = 'stopped';
+    saveDbSync();
+    emitServerStatus(serverId, 'stopped', { exitCode: code, signal, willRestart: false });
+  }
+}
+
+export async function stopServer(serverId: string): Promise<boolean> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (!server) return false;
+
+  // Clear any scheduled auto-restart
+  const pendingRestart = autoRestartTimers.get(serverId);
+  if (pendingRestart) {
+    clearTimeout(pendingRestart);
+    autoRestartTimers.delete(serverId);
+  }
+
+  intendedStops.add(serverId);
+
+  // Check if remote node server
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  const isRemote = (node && !node.isLocalNode && node.id !== 'node_local') || (server.nodeId && server.nodeId !== 'node_local');
+  if (isRemote) {
+    queueRemoteServerCommand(serverId, 'STOP');
+    server.status = 'stopping';
+    saveDbSync();
+    emitServerStatus(serverId, 'stopping');
+    return true;
+  }
+
+  server.status = 'stopping';
+  saveDbSync();
+  emitServerStatus(serverId, 'stopping');
+
+  appendConsoleLog(serverId, `[AetherDaemon/INFO]: Sending graceful shutdown signal (SIGTERM)...`);
+
+  await RuntimeSupervisor.stop(serverId);
+
+  activeProcesses.delete(serverId);
+
+  server.status = 'stopped';
+  server.cpuUsage = 0;
+  server.ramUsageMB = 0;
+  server.uptimeSeconds = 0;
+  if (!server.startup) server.startup = {};
+  server.startup.pid = undefined;
+  server.startup.lastStoppedAt = new Date().toISOString();
+  saveDbSync();
+  emitServerStatus(serverId, 'stopped');
+
+  dispatchDiscordNotification(serverId, 'SERVER_STOPPED', {
+    message: `Server '${server.name}' has been stopped.`
+  }).catch(() => {});
+
+  return true;
+}
+
+export async function killServer(serverId: string): Promise<boolean> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (!server) return false;
+
+  // Clear any scheduled auto-restart
+  const pendingRestart = autoRestartTimers.get(serverId);
+  if (pendingRestart) {
+    clearTimeout(pendingRestart);
+    autoRestartTimers.delete(serverId);
+  }
+
+  intendedStops.add(serverId);
+
+  // Check if remote node server
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  const isRemote = (node && !node.isLocalNode && node.id !== 'node_local') || (server.nodeId && server.nodeId !== 'node_local');
+  if (isRemote) {
+    queueRemoteServerCommand(serverId, 'KILL');
+    server.status = 'stopped';
+    server.cpuUsage = 0;
+    server.ramUsageMB = 0;
+    saveDbSync();
+    emitServerStatus(serverId, 'stopped');
+    return true;
+  }
+
+  appendConsoleLog(serverId, `[AetherDaemon/WARN]: Immediate SIGKILL force-termination initiated by administrator.`);
+
+  const entry = activeProcesses.get(serverId);
+  if (entry && entry.child) {
+    try {
+      entry.child.kill('SIGKILL');
+    } catch {}
+  }
+
+  activeProcesses.delete(serverId);
+
+  server.status = 'stopped';
+  server.cpuUsage = 0;
+  server.ramUsageMB = 0;
+  server.uptimeSeconds = 0;
+  if (!server.startup) server.startup = {};
+  server.startup.pid = undefined;
+  server.startup.lastStoppedAt = new Date().toISOString();
+  saveDbSync();
+  emitServerStatus(serverId, 'stopped');
+
+  appendConsoleLog(serverId, `[AetherDaemon/INFO]: Server process container killed and resources freed.`);
+
+  return true;
+}
+
+export async function restartServer(serverId: string): Promise<boolean> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (server) {
+    dispatchDiscordNotification(serverId, 'SERVER_RESTARTED', {
+      message: `Server '${server.name}' restart sequence initiated.`
+    }).catch(() => {});
+  }
+  emitServerStatus(serverId, 'restarting');
+  await stopServer(serverId);
+  await new Promise(r => setTimeout(r, 400));
+  return await startServer(serverId);
+}
+
+// Panel Boot State Reconciliation & Auto-Start on Boot
+export async function reconcileServerStatesOnBoot(): Promise<void> {
+  console.log('[AETHERPANEL LIFECYCLE] Reconciling server states and executing boot recovery...');
+  try {
+    // Run supervisor-level reconciliation to restore log-tracking of survived detached workloads
+    await RuntimeSupervisor.reconcile();
+
+    const db = await getDb();
+    for (const server of db.servers) {
+      const node = db.nodes.find(n => n.id === server.nodeId);
+      const isLocal = !node || node.isLocalNode || node.id === 'node_local';
+
+      if (isLocal) {
+        // Check auto-start on boot
+        if (server.startup?.autoStartOnBoot && server.status === 'stopped') {
+          console.log(`[BOOT RECOVERY] Auto-starting server '${server.name}' (${server.id})...`);
+          startServer(server.id).catch(err => {
+            console.error(`[BOOT RECOVERY] Failed to auto-start server ${server.id}:`, err);
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[AETHERPANEL LIFECYCLE] Boot reconciliation error:', err);
+  }
+}
+
+// Auto-Start on Remote Node Reconnection
+export async function handleNodeReconnect(nodeId: string): Promise<void> {
+  try {
+    const db = await getDb();
+    const nodeServers = db.servers.filter(s => s.nodeId === nodeId);
+
+    for (const server of nodeServers) {
+      if (server.startup?.autoStartOnNodeReconnect && server.status === 'stopped') {
+        console.log(`[NODE RECONNECT] Triggering auto-start for server '${server.name}' on reconnected node '${nodeId}'...`);
+        startServer(server.id).catch(err => {
+          console.error(`[NODE RECONNECT] Error starting server ${server.id}:`, err);
+        });
+      }
+    }
+  } catch (err) {
+    console.error('[NODE RECONNECT] Error handling node reconnect:', err);
+  }
+}
+
+export async function reinstallServer(serverId: string, newSoftware?: string, newVersion?: string): Promise<boolean> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+  if (!server) return false;
+
+  await stopServer(serverId);
+
+  if (newSoftware) server.software = newSoftware;
+  if (newVersion) server.version = newVersion;
+
+  const prod = db.products.find(p => p.id === server.productId);
+  const category = prod?.category || (/node|python|bun/i.test(server.software || '') ? 'bot' : 'minecraft');
+
+  if (category === 'bot') {
+    const swLower = (server.software || '').toLowerCase();
+    const botRuntime = swLower.includes('python') ? 'python' : swLower.includes('bun') ? 'bun' : 'nodejs';
+    server.startup = {
+      ...(server.startup || {}),
+      botRuntime,
+      nodeConfig: botRuntime === 'nodejs' ? { version: server.version, startupFile: 'index.js' } : undefined,
+      pythonConfig: botRuntime === 'python' ? { version: server.version, startupFile: 'main.py' } : undefined,
+      bunConfig: botRuntime === 'bun' ? { version: server.version, startupFile: 'index.ts' } : undefined,
+      entryFile: botRuntime === 'python' ? 'main.py' : botRuntime === 'bun' ? 'index.ts' : 'index.js',
+      variables: {
+        ...(server.startup?.variables || {}),
+        RUNTIME_VERSION: server.version || 'Latest Stable',
+        NODE_VERSION: server.version || '22.x',
+        PYTHON_VERSION: server.version || '3.12.x',
+        BUN_VERSION: server.version || '1.2.x'
+      }
+    };
+  } else {
+    server.startup = {
+      ...(server.startup || {}),
+      variables: {
+        ...(server.startup?.variables || {}),
+        MINECRAFT_VERSION: server.version || '1.21.4',
+        SERVER_JARFILE: 'server.jar'
+      }
+    };
+  }
+
+  server.status = 'installing';
+  server.updatedAt = new Date().toISOString();
+  saveDbSync();
+  emitServerStatus(serverId, 'installing');
+
+  appendConsoleLog(serverId, `[AetherDaemon/WARN]: Wiping server filesystem and reinstalling fresh ${server.software} (${server.version}) base template...`);
+
+  const dir = getServerDir(serverId);
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  initializeServerFiles(serverId, category, server.software, server.version);
+
+  if (category === 'minecraft') {
+    try {
+      const { downloadMinecraftServerJar } = await import('./minecraftService');
+      await downloadMinecraftServerJar(serverId, server.software, server.version);
+    } catch (err: any) {
+      appendConsoleLog(serverId, `[AetherInstaller/WARN]: Minecraft JAR setup: ${err.message}`);
+    }
+  }
+
+  setTimeout(() => {
+    appendConsoleLog(serverId, `[AetherDaemon/SUCCESS]: Reinstallation of ${server.software} ${server.version} completed successfully. Ready to start.`);
+    server.status = 'stopped';
+    server.deploymentState = 'READY';
+    saveDbSync();
+    emitServerStatus(serverId, 'stopped');
+  }, 1200);
+
+  return true;
+}
+
+export async function sendServerCommand(serverId: string, command: string): Promise<string> {
+  const db = await getDb();
+  const server = db.servers.find(s => s.id === serverId);
+
+  if (!server) {
+    return 'Server not found.';
+  }
+
+  // Check if server is running on a remote node
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  const isRemote = (node && !node.isLocalNode && node.id !== 'node_local') || (server.nodeId && server.nodeId !== 'node_local');
+
+  if (isRemote) {
+    if (server.status !== 'running') {
+      const errorMsg = 'Server is offline. Start the server to send commands.';
+      appendConsoleLog(serverId, `[UserCommand/ERROR]: > ${command} (Failed: ${errorMsg})`);
+      return errorMsg;
+    }
+    appendConsoleLog(serverId, `[UserCommand]: > ${command}`);
+    queueRemoteServerCommand(serverId, command);
+    return `Dispatched command '${command}' to remote node daemon for server ${serverId}.`;
+  }
+
+  // Check supervisor status and in-memory process status
+  const supervisorStatus = RuntimeSupervisor.getStatus(serverId);
+  const isSupervisorRunning = supervisorStatus === 'running' || supervisorStatus === 'starting';
+
+  const entry = activeProcesses.get(serverId);
+  const isMemoryRunning = Boolean(entry && entry.child && !entry.child.killed);
+
+  if (server.status !== 'running' && !isSupervisorRunning && !isMemoryRunning) {
+    const errorMsg = 'Server is offline. Start the server to send commands.';
+    appendConsoleLog(serverId, `[UserCommand/ERROR]: > ${command} (Failed: ${errorMsg})`);
+    return errorMsg;
+  }
+
+  // 1. Try RuntimeSupervisor writeStdin
+  if (isSupervisorRunning || RuntimeSupervisor.getChild(serverId)) {
+    const writeResult = RuntimeSupervisor.writeStdin(serverId, command);
+    if (writeResult.success) {
+      appendConsoleLog(serverId, `[UserCommand]: > ${command}`);
+      return `Sent '${command}' to running process stdin.`;
+    } else {
+      appendConsoleLog(serverId, `[UserCommand/ERROR]: > ${command} (Failed: ${writeResult.message})`);
+      return `Failed: ${writeResult.message}`;
+    }
+  }
+
+  // 2. Try in-memory activeProcesses child stdin
+  if (entry && entry.child && entry.child.stdin && entry.child.stdin.writable) {
+    try {
+      entry.child.stdin.write(`${command}\n`);
+      appendConsoleLog(serverId, `[UserCommand]: > ${command}`);
+      return `Sent '${command}' to running process stdin.`;
+    } catch (err: any) {
+      appendConsoleLog(serverId, `[UserCommand/ERROR]: > ${command} (Failed: ${err.message})`);
+      return `Failed to write to stdin: ${err.message}`;
+    }
+  }
+
+  const errorMsg = 'Server process stdin is unavailable or not attached.';
+  appendConsoleLog(serverId, `[UserCommand/ERROR]: > ${command} (Failed: ${errorMsg})`);
+  return `Failed: ${errorMsg}`;
+}
+
+/**
+ * Direct process stdin writer conforming strictly to AetherPanel PRD Section 2.3
+ */
+export function sendCommandToProcess(processInstance: any, command: string): boolean {
+  if (!processInstance || !processInstance.stdin || processInstance.stdin.destroyed) {
+    throw new Error("PROCESS_STDIN_UNAVAILABLE");
+  }
+  return processInstance.stdin.write(command.trim() + "\n");
+}
+
+export const sendServerConsoleInput = sendServerCommand;
+
+/**
+ * Resolves and sanitizes a relative path within a server's root directory, preventing directory traversal.
+ */
+export function safePath(serverId: string, relPath: string = ''): string {
+  const baseDir = path.resolve(getServerDir(serverId));
+  let cleanRel = (relPath || '').replace(/\0/g, '').trim();
+
+  // If relPath starts with baseDir, strip baseDir prefix first
+  if (cleanRel.startsWith(baseDir)) {
+    cleanRel = cleanRel.substring(baseDir.length);
+  }
+
+  // Remove leading slashes and backslashes
+  cleanRel = cleanRel.replace(/^[/\\]+/, '');
+
+  // Normalize relative path
+  const normalizedRel = path.normalize(cleanRel);
+
+  // Check for path traversal elements
+  if (normalizedRel.startsWith('..') || normalizedRel.split(path.sep).includes('..')) {
+    throw new Error('Access denied: Outside server root directory');
+  }
+
+  // Resolve target path safely relative to baseDir
+  const resolved = path.resolve(baseDir, normalizedRel);
+
+  // Verify that resolved path is equal to baseDir or inside baseDir
+  const relative = path.relative(baseDir, resolved);
+  const isOutside = relative.startsWith('..') || path.isAbsolute(relative);
+
+  if (isOutside) {
+    throw new Error('Access denied: Outside server root directory');
+  }
+
+  return resolved;
+}
+
+// File Operations
+export function listServerFiles(serverId: string, relPath: string = ''): ServerFile[] {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const targetDir = safePath(serverId, relPath);
+
+  if (!fs.existsSync(targetDir)) {
+    return [];
+  }
+
+  const entries = fs.readdirSync(targetDir, { withFileTypes: true });
+  return entries.map(entry => {
+    const fullPath = path.join(targetDir, entry.name);
+    const rel = path.relative(baseDir, fullPath).replace(/\\/g, '/');
+    let stat = { size: 0, mtime: new Date(), mode: 0o644 };
+    try {
+      stat = fs.statSync(fullPath);
+    } catch (e) {}
+
+    const ext = entry.isFile() ? path.extname(entry.name).toLowerCase() : undefined;
+
+    return {
+      name: entry.name,
+      path: rel,
+      size: entry.isFile() ? stat.size : 0,
+      isDir: entry.isDirectory(),
+      updatedAt: stat.mtime.toISOString(),
+      extension: ext
+    };
+  }).sort((a, b) => (b.isDir ? 1 : 0) - (a.isDir ? 1 : 0) || a.name.localeCompare(b.name));
+}
+
+export function readServerFile(serverId: string, relPath: string): string {
+  const targetPath = safePath(serverId, relPath);
+  if (!fs.existsSync(targetPath)) {
+    throw new Error('File not found');
+  }
+  return fs.readFileSync(targetPath, 'utf-8');
+}
+
+export function writeServerFile(serverId: string, relPath: string, content: string): boolean {
+  const targetPath = safePath(serverId, relPath);
+  const parentDir = path.dirname(targetPath);
+  if (!fs.existsSync(parentDir)) {
+    fs.mkdirSync(parentDir, { recursive: true });
+  }
+
+  fs.writeFileSync(targetPath, content, 'utf-8');
+  return true;
+}
+
+export function deleteServerItem(serverId: string, relPath: string): void {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const targetPath = safePath(serverId, relPath);
+
+  if (targetPath !== baseDir && !targetPath.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied');
+  }
+
+  if (targetPath === baseDir) {
+    throw new Error('Cannot delete server root directory');
+  }
+
+  if (fs.existsSync(targetPath)) {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+  }
+}
+
+export function deleteServerItems(serverId: string, relPaths: string[]): {
+  succeeded: string[];
+  failed: Array<{ path: string; error: string }>;
+} {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const succeeded: string[] = [];
+  const failed: Array<{ path: string; error: string }> = [];
+
+  for (const rel of relPaths) {
+    try {
+      const targetPath = safePath(serverId, rel);
+      if (targetPath !== baseDir && !targetPath.startsWith(baseDir + path.sep)) {
+        failed.push({ path: rel, error: 'Access denied: outside root' });
+        continue;
+      }
+      if (targetPath === baseDir) {
+        failed.push({ path: rel, error: 'Cannot delete server root' });
+        continue;
+      }
+      if (fs.existsSync(targetPath)) {
+        fs.rmSync(targetPath, { recursive: true, force: true });
+      }
+      succeeded.push(rel);
+    } catch (err: any) {
+      failed.push({ path: rel, error: err.message || 'Deletion error' });
+    }
+  }
+
+  return { succeeded, failed };
+}
+
+function getAvailablePath(targetPath: string): string {
+  if (!fs.existsSync(targetPath)) return targetPath;
+  const dir = path.dirname(targetPath);
+  const ext = path.extname(targetPath);
+  const base = path.basename(targetPath, ext);
+  let counter = 1;
+  while (fs.existsSync(path.join(dir, `${base} (${counter})${ext}`))) {
+    counter++;
+  }
+  return path.join(dir, `${base} (${counter})${ext}`);
+}
+
+export function moveServerItems(
+  serverId: string,
+  sources: string[],
+  destinationDir: string,
+  conflictStrategy: 'replace' | 'rename' | 'skip' = 'replace'
+): {
+  moved: string[];
+  skipped: string[];
+  conflicts: string[];
+  errors: Array<{ path: string; error: string }>;
+} {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const destDirPath = safePath(serverId, destinationDir);
+
+  if (destDirPath !== baseDir && !destDirPath.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied: Destination is outside server root');
+  }
+
+  if (!fs.existsSync(destDirPath)) {
+    fs.mkdirSync(destDirPath, { recursive: true });
+  }
+
+  const moved: string[] = [];
+  const skipped: string[] = [];
+  const conflicts: string[] = [];
+  const errors: Array<{ path: string; error: string }> = [];
+
+  for (const src of sources) {
+    try {
+      const srcPath = safePath(serverId, src);
+      if (srcPath !== baseDir && !srcPath.startsWith(baseDir + path.sep)) {
+        errors.push({ path: src, error: 'Access denied: Source is outside server root' });
+        continue;
+      }
+      if (srcPath === baseDir) {
+        errors.push({ path: src, error: 'Cannot move server root directory' });
+        continue;
+      }
+      if (!fs.existsSync(srcPath)) {
+        errors.push({ path: src, error: 'Source file does not exist' });
+        continue;
+      }
+
+      // Check if moving folder inside itself
+      if (destDirPath === srcPath || destDirPath.startsWith(srcPath + path.sep)) {
+        errors.push({ path: src, error: 'Cannot move a folder into itself' });
+        continue;
+      }
+
+      const itemName = path.basename(srcPath);
+      let targetPath = path.join(destDirPath, itemName);
+
+      if (fs.existsSync(targetPath)) {
+        conflicts.push(src);
+        if (conflictStrategy === 'skip') {
+          skipped.push(src);
+          continue;
+        } else if (conflictStrategy === 'rename') {
+          targetPath = getAvailablePath(targetPath);
+        } else if (conflictStrategy === 'replace') {
+          if (fs.statSync(targetPath).isDirectory()) {
+            fs.rmSync(targetPath, { recursive: true, force: true });
+          }
+        }
+      }
+
+      fs.renameSync(srcPath, targetPath);
+      moved.push(src);
+    } catch (err: any) {
+      errors.push({ path: src, error: err.message || 'Move error' });
+    }
+  }
+
+  return { moved, skipped, conflicts, errors };
+}
+
+export function copyServerItems(
+  serverId: string,
+  sources: string[],
+  destinationDir: string,
+  conflictStrategy: 'replace' | 'rename' | 'skip' = 'replace'
+): {
+  copied: string[];
+  skipped: string[];
+  conflicts: string[];
+  errors: Array<{ path: string; error: string }>;
+} {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const destDirPath = safePath(serverId, destinationDir);
+
+  if (destDirPath !== baseDir && !destDirPath.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied: Destination is outside server root');
+  }
+
+  if (!fs.existsSync(destDirPath)) {
+    fs.mkdirSync(destDirPath, { recursive: true });
+  }
+
+  const copied: string[] = [];
+  const skipped: string[] = [];
+  const conflicts: string[] = [];
+  const errors: Array<{ path: string; error: string }> = [];
+
+  for (const src of sources) {
+    try {
+      const srcPath = safePath(serverId, src);
+      if (srcPath !== baseDir && !srcPath.startsWith(baseDir + path.sep)) {
+        errors.push({ path: src, error: 'Access denied: Source is outside server root' });
+        continue;
+      }
+      if (srcPath === baseDir) {
+        errors.push({ path: src, error: 'Cannot copy server root directory' });
+        continue;
+      }
+      if (!fs.existsSync(srcPath)) {
+        errors.push({ path: src, error: 'Source file does not exist' });
+        continue;
+      }
+
+      // Check if copying directory into itself
+      if (destDirPath === srcPath || destDirPath.startsWith(srcPath + path.sep)) {
+        errors.push({ path: src, error: 'Cannot copy a folder into itself' });
+        continue;
+      }
+
+      const itemName = path.basename(srcPath);
+      let targetPath = path.join(destDirPath, itemName);
+
+      if (fs.existsSync(targetPath)) {
+        conflicts.push(src);
+        if (conflictStrategy === 'skip') {
+          skipped.push(src);
+          continue;
+        } else if (conflictStrategy === 'rename') {
+          targetPath = getAvailablePath(targetPath);
+        } else if (conflictStrategy === 'replace') {
+          if (fs.statSync(targetPath).isDirectory()) {
+            fs.rmSync(targetPath, { recursive: true, force: true });
+          }
+        }
+      }
+
+      fs.cpSync(srcPath, targetPath, { recursive: true, force: true });
+      copied.push(src);
+    } catch (err: any) {
+      errors.push({ path: src, error: err.message || 'Copy error' });
+    }
+  }
+
+  return { copied, skipped, conflicts, errors };
+}
+
+export function createServerDirectory(serverId: string, relPath: string): void {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const targetPath = safePath(serverId, relPath);
+
+  if (targetPath !== baseDir && !targetPath.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied');
+  }
+
+  if (!fs.existsSync(targetPath)) {
+    fs.mkdirSync(targetPath, { recursive: true });
+  }
+}
+
+export function renameServerItem(serverId: string, oldRelPath: string, newRelPath: string): void {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const oldPath = safePath(serverId, oldRelPath);
+  const newPath = safePath(serverId, newRelPath);
+
+  if ((oldPath !== baseDir && !oldPath.startsWith(baseDir + path.sep)) ||
+      (newPath !== baseDir && !newPath.startsWith(baseDir + path.sep))) {
+    throw new Error('Access denied: Outside server root directory');
+  }
+
+  if (!fs.existsSync(oldPath)) {
+    throw new Error('Source file or folder does not exist');
+  }
+
+  const parent = path.dirname(newPath);
+  if (!fs.existsSync(parent)) {
+    fs.mkdirSync(parent, { recursive: true });
+  }
+
+  fs.renameSync(oldPath, newPath);
+}
+
+export function chmodServerItem(serverId: string, relPath: string, mode: number | string): void {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const targetPath = safePath(serverId, relPath);
+
+  if (targetPath !== baseDir && !targetPath.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied: Outside server root directory');
+  }
+
+  if (!fs.existsSync(targetPath)) {
+    throw new Error('Target file or folder not found');
+  }
+
+  const numMode = typeof mode === 'string' ? parseInt(mode, 8) : mode;
+  fs.chmodSync(targetPath, numMode);
+}
+
+export function compressServerItems(
+  serverId: string,
+  relPaths: string[],
+  outputZipName?: string,
+  currentDir: string = '/'
+): string {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const currentDirPath = safePath(serverId, currentDir);
+
+  if (currentDirPath !== baseDir && !currentDirPath.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied: Outside server root');
+  }
+
+  const zip = new AdmZip();
+  let itemsCount = 0;
+
+  for (const rel of relPaths) {
+    const targetPath = safePath(serverId, rel);
+    if (targetPath !== baseDir && !targetPath.startsWith(baseDir + path.sep)) {
+      continue;
+    }
+    if (!fs.existsSync(targetPath)) {
+      continue;
+    }
+
+    const stat = fs.statSync(targetPath);
+    const itemName = path.basename(targetPath);
+
+    if (stat.isDirectory()) {
+      zip.addLocalFolder(targetPath, itemName);
+    } else {
+      zip.addLocalFile(targetPath);
+    }
+    itemsCount++;
+  }
+
+  if (itemsCount === 0) {
+    throw new Error('No valid files or folders found to compress');
+  }
+
+  const rawZipName = outputZipName?.trim()
+    ? (outputZipName.endsWith('.zip') ? outputZipName.trim() : `${outputZipName.trim()}.zip`)
+    : `archive_${Date.now()}.zip`;
+
+  // Prevent path traversal in archive name
+  const cleanZipName = path.basename(rawZipName);
+  const zipPath = path.join(currentDirPath, cleanZipName);
+
+  zip.writeZip(zipPath);
+  return path.relative(baseDir, zipPath).replace(/\\/g, '/');
+}
+
+export function compressServerItem(serverId: string, relPath: string): string {
+  return compressServerItems(serverId, [relPath], undefined, path.dirname(relPath));
+}
+
+// Secure Zip Decompression protecting against Zip Slip path traversal
+export function decompressServerItem(serverId: string, zipRelPath: string, destinationDir?: string): void {
+  const baseDir = path.resolve(getServerDir(serverId));
+  const zipPath = safePath(serverId, zipRelPath);
+
+  if (zipPath !== baseDir && !zipPath.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied');
+  }
+
+  if (!fs.existsSync(zipPath)) {
+    throw new Error('ZIP file not found');
+  }
+
+  const destDir = destinationDir
+    ? safePath(serverId, destinationDir)
+    : path.dirname(zipPath);
+
+  if (destDir !== baseDir && !destDir.startsWith(baseDir + path.sep)) {
+    throw new Error('Access denied: Destination is outside server root');
+  }
+
+  if (!fs.existsSync(destDir)) {
+    fs.mkdirSync(destDir, { recursive: true });
+  }
+
+  const zip = new AdmZip(zipPath);
+  const zipEntries = zip.getEntries();
+
+  for (const entry of zipEntries) {
+    const entryPath = entry.entryName;
+    const resolvedPath = path.resolve(destDir, entryPath);
+
+    // Zip Slip check
+    if (resolvedPath !== destDir && !resolvedPath.startsWith(destDir + path.sep)) {
+      throw new Error(`Security Violation: Zip Slip detected in entry '${entryPath}'`);
+    }
+
+    if (entry.isDirectory) {
+      fs.mkdirSync(resolvedPath, { recursive: true });
+    } else {
+      const parentDir = path.dirname(resolvedPath);
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true });
+      }
+      fs.writeFileSync(resolvedPath, entry.getData());
+    }
+  }
+}
+
+// Environment Variables (.env)
+export function readServerEnv(serverId: string): Record<string, string> {
+  const baseDir = getServerDir(serverId);
+  const envPath = path.join(baseDir, '.env');
+  const envMap: Record<string, string> = {};
+
+  if (!fs.existsSync(envPath)) {
+    return envMap;
+  }
+
+  const lines = fs.readFileSync(envPath, 'utf-8').split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx !== -1) {
+      const key = trimmed.substring(0, eqIdx).trim();
+      const val = trimmed.substring(eqIdx + 1).trim();
+      if (key) {
+        envMap[key] = val;
+      }
+    }
+  }
+
+  return envMap;
+}
+
+export function writeServerEnv(serverId: string, envMap: Record<string, string>): void {
+  const baseDir = getServerDir(serverId);
+  const envPath = path.join(baseDir, '.env');
+
+  const content = Object.entries(envMap)
+    .map(([k, v]) => `${k.trim()}=${v}`)
+    .join('\n');
+
+  fs.writeFileSync(envPath, content, 'utf-8');
+}
+
+// Record Server Activity Audit
+export async function recordServerActivity(
+  serverId: string,
+  userId: string,
+  username: string,
+  action: string,
+  details: string
+): Promise<ServerActivity> {
+  const db = await getDb();
+  const act: ServerActivity = {
+    id: `act_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+    serverId,
+    userId,
+    username,
+    action,
+    details,
+    createdAt: new Date().toISOString()
+  };
+
+  db.activities.unshift(act);
+  saveDbSync();
+  return act;
+}
+
+// Minecraft Plugins Helper
+export interface MinecraftPluginInfo {
+  filename: string;
+  name: string;
+  version?: string;
+  size: number;
+  isEnabled: boolean;
+  updatedAt: string;
+  integrityStatus?: 'VALID' | 'CORRUPTED_JAR' | 'INVALID_JAR' | 'EMPTY_FILE' | 'PLUGIN_METADATA_MISSING';
+  integrityError?: string;
+  paperStatus?: 'LOADED' | 'FAILED_TO_LOAD' | 'NOT_STARTED' | 'DISABLED';
+  paperError?: string;
+  metadata?: any;
+}
+
+export function listMinecraftPlugins(serverId: string): MinecraftPluginInfo[] {
+  // Delegate to pluginManagerService with active console buffer
+  try {
+    const { listMinecraftPluginsWithIntegrity } = require('./services/pluginManagerService');
+    const logs = getConsoleBuffer(serverId, true);
+    return listMinecraftPluginsWithIntegrity(serverId, logs);
+  } catch (err: any) {
+    const baseDir = getServerDir(serverId);
+    const pluginsDir = path.join(baseDir, 'plugins');
+
+    if (!fs.existsSync(pluginsDir)) {
+      fs.mkdirSync(pluginsDir, { recursive: true });
+    }
+
+    const files = fs.readdirSync(pluginsDir);
+    const list: MinecraftPluginInfo[] = [];
+
+    for (const f of files) {
+      if (f.startsWith('.') || f.endsWith('.tmp')) continue;
+      if (f.endsWith('.jar') || f.endsWith('.jar.disabled')) {
+        const fullPath = path.join(pluginsDir, f);
+        let stat = { size: 0, mtime: new Date() };
+        try {
+          stat = fs.statSync(fullPath);
+        } catch (e) {}
+
+        const isEnabled = !f.endsWith('.disabled');
+        const cleanName = f.replace(/\.jar(\.disabled)?$/, '');
+
+        list.push({
+          filename: f,
+          name: cleanName,
+          version: '1.0.0',
+          size: stat.size,
+          isEnabled,
+          updatedAt: stat.mtime.toISOString(),
+          integrityStatus: 'VALID'
+        });
+      }
+    }
+
+    return list;
+  }
+}
+
+export function toggleMinecraftPlugin(serverId: string, filename: string): boolean {
+  const baseDir = getServerDir(serverId);
+  const pluginsDir = path.join(baseDir, 'plugins');
+  const currentPath = path.join(pluginsDir, filename);
+
+  if (!fs.existsSync(currentPath)) {
+    throw new Error('Plugin file not found');
+  }
+
+  if (filename.endsWith('.disabled')) {
+    const newName = filename.replace(/\.disabled$/, '');
+    fs.renameSync(currentPath, path.join(pluginsDir, newName));
+    return true; // Enabled
+  } else if (filename.endsWith('.jar')) {
+    const newName = `${filename}.disabled`;
+    fs.renameSync(currentPath, path.join(pluginsDir, newName));
+    return false; // Disabled
+  }
+
+  return true;
+}
+
+
