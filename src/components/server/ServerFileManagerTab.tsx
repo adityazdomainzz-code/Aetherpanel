@@ -1,0 +1,2196 @@
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import {
+  Folder, FileText, Upload, Plus, Download, Trash2, Edit3, Archive,
+  FolderPlus, FilePlus, ChevronRight, CornerLeftUp, CheckSquare,
+  Square, AlertTriangle, X, Loader2, ArrowRightLeft, Copy, RefreshCw,
+  FileCode, FileArchive, CheckCircle2, AlertCircle, Globe, Link, DownloadCloud, Sparkles,
+  Pause, Play
+} from 'lucide-react';
+import { apiRequest } from '../../lib/api';
+import { useToast } from '../../lib/ToastContext';
+import { ServerFile } from '../../types';
+import { normalizeServerPath, joinServerPath, getParentServerPath, buildBreadcrumbs } from '../../lib/pathUtils';
+
+interface ServerFileManagerTabProps {
+  serverId: string;
+}
+
+interface UploadTask {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  progress: number;
+  status: 'pending' | 'uploading' | 'completed' | 'error' | 'paused';
+  error?: string;
+  uploadId?: string;
+  currentChunk?: number;
+  totalChunks?: number;
+  speedMBs?: number;
+  etaSeconds?: number;
+  isPaused?: boolean;
+}
+
+export const ServerFileManagerTab: React.FC<ServerFileManagerTabProps> = ({ serverId }) => {
+  const { toast } = useToast();
+
+  // State
+  const [currentPath, setCurrentPath] = useState<string>('/');
+  const [files, setFiles] = useState<ServerFile[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Multi-select
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+
+  // Drag and Drop
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
+  const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
+  const [showUploadDrawer, setShowUploadDrawer] = useState<boolean>(false);
+
+  // Modals
+  const [showRemoteDownloadModal, setShowRemoteDownloadModal] = useState<boolean>(false);
+  const [remoteUrl, setRemoteUrl] = useState<string>('');
+  const [remoteFilename, setRemoteFilename] = useState<string>('');
+  const [autoExtractRemote, setAutoExtractRemote] = useState<boolean>(false);
+  const [isStartingRemoteDownload, setIsStartingRemoteDownload] = useState<boolean>(false);
+  const [activeRemoteJob, setActiveRemoteJob] = useState<any | null>(null);
+
+  const [showNewFileModal, setShowNewFileModal] = useState<boolean>(false);
+  const [newFileName, setNewFileName] = useState<string>('');
+  
+  const [showNewFolderModal, setShowNewFolderModal] = useState<boolean>(false);
+  const [newFolderName, setNewFolderName] = useState<string>('');
+
+  const [renameTarget, setRenameTarget] = useState<ServerFile | null>(null);
+  const [renameValue, setRenameValue] = useState<string>('');
+
+  const [deleteTargets, setDeleteTargets] = useState<ServerFile[] | null>(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
+
+  const [moveCopyAction, setMoveCopyAction] = useState<{ mode: 'move' | 'copy'; sources: string[] } | null>(null);
+  const [destDir, setDestDir] = useState<string>('/');
+  const [conflictStrategy, setConflictStrategy] = useState<'replace' | 'rename' | 'skip'>('replace');
+  const [isMovingOrCopying, setIsMovingOrCopying] = useState<boolean>(false);
+
+  const [compressTargets, setCompressTargets] = useState<string[] | null>(null);
+  const [archiveName, setArchiveName] = useState<string>('');
+  const [isCompressing, setIsCompressing] = useState<boolean>(false);
+
+  // File Editor
+  const [editingFile, setEditingFile] = useState<ServerFile | null>(null);
+  const [fileContent, setFileContent] = useState<string>('');
+  const [isLoadingContent, setIsLoadingContent] = useState<boolean>(false);
+  const [isSavingContent, setIsSavingContent] = useState<boolean>(false);
+
+  // Advanced File Editor States
+  const [editorStyle, setEditorStyle] = useState<'obsidian' | 'midnight' | 'laser' | 'emerald'>('obsidian');
+  const [syntaxStatus, setSyntaxStatus] = useState<{ success: boolean; message?: string } | null>(null);
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lineNumbersRef = useRef<HTMLDivElement>(null);
+
+  const handleEditorScroll = () => {
+    if (textareaRef.current && lineNumbersRef.current) {
+      lineNumbersRef.current.scrollTop = textareaRef.current.scrollTop;
+    }
+  };
+
+  const handleValidateSyntax = () => {
+    if (!editingFile) return;
+    const nameLower = editingFile.name.toLowerCase();
+    
+    if (nameLower.endsWith('.json')) {
+      try {
+        JSON.parse(fileContent);
+        setSyntaxStatus({ success: true, message: 'JSON format is 100% Valid and Secure!' });
+      } catch (e: any) {
+        setSyntaxStatus({ success: false, message: e.message || 'JSON Syntax Error detected.' });
+      }
+    } else if (nameLower.endsWith('.properties')) {
+      const lines = fileContent.split('\n');
+      const badLines: number[] = [];
+      lines.forEach((line, idx) => {
+        const t = line.trim();
+        if (t && !t.startsWith('#') && !t.includes('=')) {
+          badLines.push(idx + 1);
+        }
+      });
+      if (badLines.length > 0) {
+        setSyntaxStatus({ success: false, message: `Format Warning: Missing '=' separator on line(s): ${badLines.join(', ')}` });
+      } else {
+        setSyntaxStatus({ success: true, message: 'Properties format is Valid!' });
+      }
+    } else if (nameLower.endsWith('.yml') || nameLower.endsWith('.yaml')) {
+      const lines = fileContent.split('\n');
+      const badLines: number[] = [];
+      lines.forEach((line, idx) => {
+        if (line.includes('\t')) {
+          badLines.push(idx + 1);
+        }
+      });
+      if (badLines.length > 0) {
+        setSyntaxStatus({ success: false, message: `YAML Warning: Tabs detected on line(s) [${badLines.join(', ')}]. YAML requires spaces for indentation.` });
+      } else {
+        setSyntaxStatus({ success: true, message: 'YAML spacing check passed!' });
+      }
+    } else {
+      setSyntaxStatus({ success: true, message: 'Structure validation passed: No format conflicts found.' });
+    }
+  };
+
+  // Reset validator on file load
+  useEffect(() => {
+    setSyntaxStatus(null);
+  }, [editingFile]);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch Directory Files
+  const fetchFiles = useCallback(async (path: string) => {
+    setLoading(true);
+    setLoadError(null);
+    const normPath = normalizeServerPath(path);
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files?path=${encodeURIComponent(normPath)}`);
+      if (res.success) {
+        const fileList = Array.isArray(res.data) ? res.data : (res.data?.files || []);
+        // Guarantee file item paths are normalized relative to root
+        const normalizedFiles = fileList.map((f: ServerFile) => ({
+          ...f,
+          path: normalizeServerPath(f.path)
+        }));
+        setFiles(normalizedFiles);
+      } else {
+        setLoadError(res.error?.message || 'Failed to list directory contents.');
+      }
+    } catch (err: any) {
+      setLoadError(err.message || 'Network error listing directory.');
+    } finally {
+      setLoading(false);
+      setSelectedPaths([]);
+    }
+  }, [serverId]);
+
+  useEffect(() => {
+    fetchFiles(currentPath);
+  }, [fetchFiles, currentPath]);
+
+  // Format File Size
+  const formatSize = (bytes: number): string => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
+  // Format Date
+  const formatDate = (isoStr?: string): string => {
+    if (!isoStr) return '—';
+    try {
+      const d = new Date(isoStr);
+      return d.toLocaleDateString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch {
+      return '—';
+    }
+  };
+
+  // Breadcrumbs
+  const breadcrumbs = useMemo(() => {
+    return buildBreadcrumbs(currentPath);
+  }, [currentPath]);
+
+  const navigateUp = () => {
+    const parent = getParentServerPath(currentPath);
+    setCurrentPath(parent);
+  };
+
+  // Selection Logic
+  const allSelected = files.length > 0 && files.every(f => selectedPaths.includes(f.path));
+  const someSelected = files.some(f => selectedPaths.includes(f.path)) && !allSelected;
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedPaths([]);
+    } else {
+      setSelectedPaths(files.map(f => f.path));
+    }
+  };
+
+  const toggleSelectPath = (path: string) => {
+    const norm = normalizeServerPath(path);
+    setSelectedPaths(prev =>
+      prev.includes(norm) ? prev.filter(p => p !== norm) : [...prev, norm]
+    );
+  };
+
+  // Navigation into folder or open editor
+  const handleItemClick = async (file: ServerFile) => {
+    if (file.isDir) {
+      const newPath = joinServerPath(currentPath, file.name);
+      setCurrentPath(newPath);
+    } else {
+      openFileEditor(file);
+    }
+  };
+
+  // Open File Editor
+  const openFileEditor = async (file: ServerFile) => {
+    setEditingFile(file);
+    setIsLoadingContent(true);
+    const normPath = normalizeServerPath(file.path);
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/content?path=${encodeURIComponent(normPath)}`);
+      if (res.success && res.data) {
+        setFileContent(res.data.content || '');
+      } else {
+        toast.error(res.error?.message || 'Could not load file content.');
+        setEditingFile(null);
+      }
+    } catch (err: any) {
+      toast.error(`Failed to read file: ${err.message}`);
+      setEditingFile(null);
+    } finally {
+      setIsLoadingContent(false);
+    }
+  };
+
+  // Save File Editor
+  const handleSaveFile = async () => {
+    if (!editingFile) return;
+    setIsSavingContent(true);
+    const normPath = normalizeServerPath(editingFile.path);
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/content`, {
+        method: 'POST',
+        body: JSON.stringify({ path: normPath, content: fileContent })
+      });
+      if (res.success) {
+        toast.success(`Saved '${editingFile.name}' successfully.`);
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || 'Failed to save file.');
+      }
+    } catch (err: any) {
+      toast.error(`Save error: ${err.message}`);
+    } finally {
+      setIsSavingContent(false);
+    }
+  };
+
+  // Create File
+  const handleCreateFile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFileName.trim()) return;
+    const name = newFileName.trim();
+    const filePath = joinServerPath(currentPath, name);
+
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/content`, {
+        method: 'POST',
+        body: JSON.stringify({ path: filePath, content: '' })
+      });
+      if (res.success) {
+        toast.success(`Created file '${name}'.`);
+        setNewFileName('');
+        setShowNewFileModal(false);
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || 'Failed to create file.');
+      }
+    } catch (err: any) {
+      toast.error(`Create error: ${err.message}`);
+    }
+  };
+
+  // Start Remote URL Download
+  const handleStartRemoteDownload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!remoteUrl.trim()) return;
+
+    setIsStartingRemoteDownload(true);
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/remote-download`, {
+        method: 'POST',
+        body: JSON.stringify({
+          url: remoteUrl.trim(),
+          targetFolder: currentPath,
+          customFilename: remoteFilename.trim() || undefined,
+          autoExtract: autoExtractRemote
+        })
+      });
+
+      if (res.success && res.data) {
+        toast.success('Remote download job started!');
+        setActiveRemoteJob(res.data);
+      } else {
+        toast.error(res.error?.message || 'Failed to start remote download.');
+        setIsStartingRemoteDownload(false);
+      }
+    } catch (err: any) {
+      toast.error(`Remote download error: ${err.message}`);
+      setIsStartingRemoteDownload(false);
+    }
+  };
+
+  // Poll Active Remote Download Job
+  useEffect(() => {
+    if (!activeRemoteJob || ['completed', 'error'].includes(activeRemoteJob.status)) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiRequest(`/servers/${serverId}/files/remote-download/jobs/${activeRemoteJob.id}`);
+        if (res.success && res.data) {
+          setActiveRemoteJob(res.data);
+          if (res.data.status === 'completed') {
+            toast.success(`Successfully downloaded '${res.data.filename}'!`);
+            setIsStartingRemoteDownload(false);
+            fetchFiles(currentPath);
+          } else if (res.data.status === 'error') {
+            toast.error(`Download failed: ${res.data.error || 'Unknown error'}`);
+            setIsStartingRemoteDownload(false);
+          }
+        }
+      } catch {
+        // keep polling
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [activeRemoteJob, serverId, currentPath, fetchFiles, toast]);
+
+  // Create Folder
+  const handleCreateFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFolderName.trim()) return;
+    const name = newFolderName.trim();
+    const folderPath = joinServerPath(currentPath, name);
+
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/mkdir`, {
+        method: 'POST',
+        body: JSON.stringify({ path: folderPath })
+      });
+      if (res.success) {
+        toast.success(`Created folder '${name}'.`);
+        setNewFolderName('');
+        setShowNewFolderModal(false);
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || 'Failed to create folder.');
+      }
+    } catch (err: any) {
+      toast.error(`Create folder error: ${err.message}`);
+    }
+  };
+
+  // Rename
+  const handleRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!renameTarget || !renameValue.trim()) return;
+    const oldPath = normalizeServerPath(renameTarget.path);
+    const newPath = joinServerPath(currentPath, renameValue.trim());
+
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/rename`, {
+        method: 'POST',
+        body: JSON.stringify({ oldPath, newPath })
+      });
+      if (res.success) {
+        toast.success(`Renamed to '${renameValue.trim()}'.`);
+        setRenameTarget(null);
+        setRenameValue('');
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || 'Failed to rename item.');
+      }
+    } catch (err: any) {
+      toast.error(`Rename error: ${err.message}`);
+    }
+  };
+
+  // Deletion Confirmation & Execution
+  const executeDelete = async () => {
+    if (!deleteTargets || deleteTargets.length === 0) return;
+    setIsDeleting(true);
+
+    const paths = deleteTargets.map(t => normalizeServerPath(t.path));
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/bulk-delete`, {
+        method: 'POST',
+        body: JSON.stringify({ paths })
+      });
+
+      if (res.success) {
+        toast.success(res.message || `Deleted ${paths.length} item(s).`);
+        setDeleteTargets(null);
+        setSelectedPaths([]);
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || 'Failed to delete selected item(s).');
+      }
+    } catch (err: any) {
+      toast.error(`Delete error: ${err.message}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Move / Copy Execution
+  const executeMoveOrCopy = async () => {
+    if (!moveCopyAction) return;
+    setIsMovingOrCopying(true);
+
+    const endpoint = moveCopyAction.mode === 'move' ? 'move' : 'copy';
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/${endpoint}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sources: moveCopyAction.sources.map(s => normalizeServerPath(s)),
+          destinationDir: normalizeServerPath(destDir),
+          conflictStrategy
+        })
+      });
+
+      if (res.success) {
+        toast.success(res.message || `${moveCopyAction.mode === 'move' ? 'Moved' : 'Copied'} items successfully.`);
+        setMoveCopyAction(null);
+        setSelectedPaths([]);
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || `Failed to ${moveCopyAction.mode} items.`);
+      }
+    } catch (err: any) {
+      toast.error(`Operation failed: ${err.message}`);
+    } finally {
+      setIsMovingOrCopying(false);
+    }
+  };
+
+  // Compress Execution
+  const executeCompress = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!compressTargets || compressTargets.length === 0) return;
+    setIsCompressing(true);
+
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/compress`, {
+        method: 'POST',
+        body: JSON.stringify({
+          paths: compressTargets.map(p => normalizeServerPath(p)),
+          outputName: archiveName || undefined,
+          currentDir: normalizeServerPath(currentPath)
+        })
+      });
+
+      if (res.success) {
+        toast.success('Compressed into ZIP archive.');
+        setCompressTargets(null);
+        setArchiveName('');
+        setSelectedPaths([]);
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || 'Compression failed.');
+      }
+    } catch (err: any) {
+      toast.error(`Compression error: ${err.message}`);
+    } finally {
+      setIsCompressing(false);
+    }
+  };
+
+  // Decompress Execution
+  const handleDecompress = async (file: ServerFile) => {
+    try {
+      const res = await apiRequest(`/servers/${serverId}/files/decompress`, {
+        method: 'POST',
+        body: JSON.stringify({
+          path: normalizeServerPath(file.path),
+          destinationDir: normalizeServerPath(currentPath)
+        })
+      });
+
+      if (res.success) {
+        toast.success(`Extracted '${file.name}' successfully.`);
+        fetchFiles(currentPath);
+      } else {
+        toast.error(res.error?.message || 'Failed to extract archive.');
+      }
+    } catch (err: any) {
+      toast.error(`Decompression error: ${err.message}`);
+    }
+  };
+
+  const pausedTasksRef = useRef<Record<string, boolean>>({});
+
+  const togglePauseTask = (taskId: string) => {
+    const isPaused = !pausedTasksRef.current[taskId];
+    pausedTasksRef.current[taskId] = isPaused;
+    setUploadTasks(prev =>
+      prev.map(t => t.id === taskId ? { ...t, status: isPaused ? 'paused' : 'uploading', isPaused } : t)
+    );
+  };
+
+  // Upload Management (Resumable Chunked Engine for 5GB - 15GB+)
+  const processUploadQueue = async (tasks: UploadTask[]) => {
+    setShowUploadDrawer(true);
+    const token = localStorage.getItem('aether_token');
+
+    for (const task of tasks) {
+      if (task.status === 'completed') continue;
+
+      const normCurrent = normalizeServerPath(currentPath);
+      const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunk slices
+      const totalChunks = Math.max(1, Math.ceil(task.file.size / CHUNK_SIZE));
+
+      setUploadTasks(prev =>
+        prev.map(t => t.id === task.id ? {
+          ...t,
+          status: 'uploading',
+          progress: 1,
+          totalChunks,
+          currentChunk: 0,
+          speedMBs: 0
+        } : t)
+      );
+
+      try {
+        // Step 1: Initialize Resumable Session
+        const initRes = await fetch(`/api/v1/servers/${serverId}/files/upload/init`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify({
+            fileName: task.file.name,
+            fileSize: task.file.size,
+            targetPath: normCurrent,
+            chunkSize: CHUNK_SIZE
+          })
+        });
+
+        const initData = await initRes.json();
+        if (!initData.success) {
+          throw new Error(initData.error?.message || 'Failed to initialize resumable upload session');
+        }
+
+        const session = initData.data;
+        const uploadId = session.uploadId;
+        const uploadedChunks: number[] = session.uploadedChunks || [];
+        let totalUploadedBytes = uploadedChunks.length * CHUNK_SIZE;
+
+        setUploadTasks(prev =>
+          prev.map(t => t.id === task.id ? { ...t, uploadId, totalChunks } : t)
+        );
+
+        const uploadStartTime = Date.now();
+        let bytesTransferredThisSession = 0;
+
+        // Step 2: Upload Chunks Sequentially
+        for (let i = 0; i < totalChunks; i++) {
+          // Pause handling: wait while task is paused
+          while (pausedTasksRef.current[task.id]) {
+            await new Promise(r => setTimeout(r, 400));
+          }
+
+          if (uploadedChunks.includes(i)) continue;
+
+          const startByte = i * CHUNK_SIZE;
+          const endByte = Math.min(task.file.size, startByte + CHUNK_SIZE);
+          const chunkBlob = task.file.slice(startByte, endByte);
+
+          let chunkSuccess = false;
+          let retries = 3;
+
+          while (retries > 0 && !chunkSuccess) {
+            try {
+              const formData = new FormData();
+              formData.append('uploadId', uploadId);
+              formData.append('chunkIndex', String(i));
+              formData.append('chunk', chunkBlob, `part_${i}.chunk`);
+
+              const chunkRes = await fetch(`/api/v1/servers/${serverId}/files/upload/chunk`, {
+                method: 'POST',
+                headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+                body: formData
+              });
+
+              const chunkData = await chunkRes.json();
+              if (chunkData.success) {
+                chunkSuccess = true;
+                uploadedChunks.push(i);
+                totalUploadedBytes += chunkBlob.size;
+                bytesTransferredThisSession += chunkBlob.size;
+
+                const elapsedSeconds = Math.max(0.1, (Date.now() - uploadStartTime) / 1000);
+                const currentSpeedMBs = +((bytesTransferredThisSession / (1024 * 1024)) / elapsedSeconds).toFixed(1);
+                const remainingBytes = Math.max(0, task.file.size - totalUploadedBytes);
+                const etaSec = currentSpeedMBs > 0 ? Math.ceil((remainingBytes / (1024 * 1024)) / currentSpeedMBs) : 0;
+                const pct = Math.min(99, Math.round((totalUploadedBytes / task.file.size) * 100));
+
+                setUploadTasks(prev =>
+                  prev.map(t => t.id === task.id ? {
+                    ...t,
+                    progress: pct,
+                    currentChunk: i + 1,
+                    totalChunks,
+                    speedMBs: currentSpeedMBs,
+                    etaSeconds: etaSec
+                  } : t)
+                );
+              } else {
+                retries--;
+                await new Promise(r => setTimeout(r, 1000));
+              }
+            } catch (err) {
+              retries--;
+              await new Promise(r => setTimeout(r, 1000));
+            }
+          }
+
+          if (!chunkSuccess) {
+            throw new Error(`Chunk ${i + 1}/${totalChunks} failed after 3 retries.`);
+          }
+        }
+
+        // Step 3: Finalize & Assemble File
+        setUploadTasks(prev =>
+          prev.map(t => t.id === task.id ? { ...t, progress: 99, status: 'uploading' } : t)
+        );
+
+        const completeRes = await fetch(`/api/v1/servers/${serverId}/files/upload/complete`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify({ uploadId })
+        });
+
+        const completeData = await completeRes.json();
+        if (completeData.success) {
+          setUploadTasks(prev =>
+            prev.map(t => t.id === task.id ? {
+              ...t,
+              status: 'completed',
+              progress: 100,
+              speedMBs: 0,
+              etaSeconds: 0
+            } : t)
+          );
+          toast.success(`'${task.file.name}' uploaded and verified successfully.`);
+        } else {
+          throw new Error(completeData.error?.message || 'Assembly verification failed');
+        }
+      } catch (err: any) {
+        setUploadTasks(prev =>
+          prev.map(t => t.id === task.id ? {
+            ...t,
+            status: 'error',
+            error: err.message || 'Upload error'
+          } : t)
+        );
+        toast.error(`Upload error on '${task.file.name}': ${err.message}`);
+      }
+    }
+
+    fetchFiles(currentPath);
+  };
+
+  const handleFilesSelected = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const newTasks: UploadTask[] = Array.from(fileList).map(file => ({
+      id: `${file.name}-${Date.now()}-${Math.random()}`,
+      file,
+      name: file.name,
+      size: file.size,
+      progress: 0,
+      status: 'pending'
+    }));
+
+    setUploadTasks(prev => [...newTasks, ...prev]);
+    processUploadQueue(newTasks);
+
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (folderInputRef.current) folderInputRef.current.value = '';
+  };
+
+  // Drag and Drop Event Listeners
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFilesSelected(e.dataTransfer.files);
+    }
+  };
+
+  // Download File
+  const handleDownload = (file: ServerFile) => {
+    const token = localStorage.getItem('aether_token');
+    const normPath = normalizeServerPath(file.path);
+    const url = `/api/v1/servers/${serverId}/files/download?path=${encodeURIComponent(normPath)}`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  // Available directories for Move/Copy picker
+  const availableDirs = useMemo(() => {
+    return ['/', ...files.filter(f => f.isDir).map(f => joinServerPath(currentPath, f.name))];
+  }, [files, currentPath]);
+
+  // Selected files list
+  const selectedFilesList = files.filter(f => selectedPaths.includes(f.path));
+
+  // Determine file icon
+  const getFileIcon = (file: ServerFile) => {
+    if (file.isDir) return <Folder className="h-4 w-4 text-amber-400 shrink-0" />;
+    const ext = file.extension?.toLowerCase();
+    if (ext === '.zip' || ext === '.tar' || ext === '.gz') {
+      return <FileArchive className="h-4 w-4 text-emerald-400 shrink-0" />;
+    }
+    if (['.json', '.yml', '.yaml', '.properties', '.toml', '.env', '.sh'].includes(ext || '')) {
+      return <FileCode className="h-4 w-4 text-violet-400 shrink-0" />;
+    }
+    return <FileText className="h-4 w-4 text-zinc-400 shrink-0" />;
+  };
+
+  return (
+    <div
+      id="server-file-manager"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className="relative space-y-4 min-h-[500px]"
+    >
+      {/* Visual Drop Overlay */}
+      {isDragOver && (
+        <div className="absolute inset-0 z-40 bg-amber-500/15 backdrop-blur-xs border-2 border-dashed border-amber-400 rounded-3xl flex flex-col items-center justify-center pointer-events-none p-6 animate-in fade-in">
+          <Upload className="h-12 w-12 text-amber-400 animate-bounce mb-2" />
+          <h3 className="text-lg font-bold text-white">Drop files here to upload</h3>
+          <p className="text-xs text-amber-200 mt-1">Files will be uploaded directly into {currentPath}</p>
+        </div>
+      )}
+
+      {/* Hidden File / Folder Inputs */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={e => handleFilesSelected(e.target.files)}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        // @ts-ignore
+        webkitdirectory=""
+        className="hidden"
+        onChange={e => handleFilesSelected(e.target.files)}
+      />
+
+      {/* Action Bar & Breadcrumbs */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-zinc-900/80 border border-zinc-800 p-3.5 rounded-2xl">
+        {/* Breadcrumb Path */}
+        <div className="flex items-center gap-1.5 overflow-x-auto text-xs font-mono py-1 max-w-full">
+          {currentPath !== '/' && (
+            <button
+              id="file-manager-nav-up"
+              onClick={navigateUp}
+              className="p-1.5 text-zinc-400 hover:text-white bg-zinc-800 rounded-lg mr-1 cursor-pointer transition-colors"
+              title="Go up one folder"
+            >
+              <CornerLeftUp className="h-3.5 w-3.5" />
+            </button>
+          )}
+
+          {breadcrumbs.map((crumb, idx) => (
+            <React.Fragment key={crumb.path}>
+              {idx > 0 && <ChevronRight className="h-3 w-3 text-zinc-600 shrink-0" />}
+              <button
+                onClick={() => setCurrentPath(crumb.path)}
+                className={`px-2 py-1 rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
+                  idx === breadcrumbs.length - 1
+                    ? 'text-amber-400 font-bold bg-amber-400/10'
+                    : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+                }`}
+              >
+                {crumb.name}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+
+        {/* Global Toolbar Buttons */}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            id="file-manager-refresh-btn"
+            onClick={() => fetchFiles(currentPath)}
+            disabled={loading}
+            className="p-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+            title="Refresh Directory"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+
+          <button
+            id="file-manager-upload-btn"
+            onClick={() => fileInputRef.current?.click()}
+            className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold text-xs flex items-center gap-1.5 shadow-md shadow-amber-950/20 transition-colors cursor-pointer"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            <span>Upload</span>
+          </button>
+
+          <button
+            id="file-manager-remote-download-btn"
+            onClick={() => {
+              setRemoteUrl('');
+              setRemoteFilename('');
+              setAutoExtractRemote(false);
+              setActiveRemoteJob(null);
+              setIsStartingRemoteDownload(false);
+              setShowRemoteDownloadModal(true);
+            }}
+            className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <DownloadCloud className="h-3.5 w-3.5 text-cyan-400" />
+            <span>Remote URL</span>
+          </button>
+
+          <button
+            id="file-manager-new-file-btn"
+            onClick={() => setShowNewFileModal(true)}
+            className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <FilePlus className="h-3.5 w-3.5 text-zinc-400" />
+            <span>New File</span>
+          </button>
+
+          <button
+            id="file-manager-new-folder-btn"
+            onClick={() => setShowNewFolderModal(true)}
+            className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <FolderPlus className="h-3.5 w-3.5 text-amber-400" />
+            <span>New Folder</span>
+          </button>
+
+          {uploadTasks.length > 0 && (
+            <button
+              onClick={() => setShowUploadDrawer(prev => !prev)}
+              className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium flex items-center gap-1.5 relative transition-colors cursor-pointer"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span>Transfers ({uploadTasks.length})</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Multi-Selection Bulk Action Bar */}
+      {selectedPaths.length > 0 && (
+        <div
+          id="file-manager-bulk-toolbar"
+          className="p-3 sm:p-4 rounded-2xl bg-zinc-900 border border-amber-500/30 flex flex-wrap items-center justify-between gap-3 shadow-lg shadow-amber-950/10 animate-in fade-in"
+        >
+          <div className="flex items-center gap-2.5 text-xs text-zinc-200">
+            <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 font-mono font-bold">
+              {selectedPaths.length}
+            </span>
+            <span>{selectedPaths.length === 1 ? 'item selected' : 'items selected'}</span>
+            <button
+              onClick={() => setSelectedPaths([])}
+              className="text-zinc-400 hover:text-white underline ml-1 cursor-pointer text-xs"
+            >
+              Clear
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => {
+                setMoveCopyAction({ mode: 'move', sources: selectedPaths });
+                setDestDir(currentPath);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <ArrowRightLeft className="h-3.5 w-3.5 text-amber-400" />
+              <span>Move</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setMoveCopyAction({ mode: 'copy', sources: selectedPaths });
+                setDestDir(currentPath);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Copy className="h-3.5 w-3.5 text-violet-400" />
+              <span>Copy</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setCompressTargets(selectedPaths);
+                setArchiveName(`archive_${Date.now()}.zip`);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Archive className="h-3.5 w-3.5 text-emerald-400" />
+              <span>Compress ZIP</span>
+            </button>
+
+            <button
+              onClick={() => setDeleteTargets(selectedFilesList)}
+              className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs flex items-center gap-1.5 shadow-md shadow-rose-950/20 transition-colors cursor-pointer"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Delete</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main File Table / List */}
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/60 overflow-hidden">
+        {loading ? (
+          <div className="p-16 text-center text-xs text-zinc-400 flex flex-col items-center justify-center gap-3">
+            <Loader2 className="h-7 w-7 animate-spin text-amber-400" />
+            <span>Loading directory contents...</span>
+          </div>
+        ) : loadError ? (
+          <div className="p-12 text-center space-y-3">
+            <AlertCircle className="h-8 w-8 text-rose-400 mx-auto" />
+            <p className="text-xs text-rose-300">{loadError}</p>
+            <button
+              onClick={() => fetchFiles(currentPath)}
+              className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold inline-flex items-center gap-2 cursor-pointer"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>Retry</span>
+            </button>
+          </div>
+        ) : files.length === 0 ? (
+          <div className="p-16 text-center space-y-4">
+            <div className="h-12 w-12 rounded-2xl bg-zinc-800/80 border border-zinc-700 flex items-center justify-center mx-auto text-zinc-500">
+              <Folder className="h-6 w-6" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-white">This folder is empty</h3>
+              <p className="text-xs text-zinc-500 mt-1">Upload files or create new items to get started.</p>
+            </div>
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-md"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                <span>Upload Files</span>
+              </button>
+              <button
+                onClick={() => setShowNewFileModal(true)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+              >
+                <FilePlus className="h-3.5 w-3.5" />
+                <span>New File</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            {/* Mobile Cards View (< sm screens) */}
+            <div className="sm:hidden divide-y divide-zinc-800/80">
+              <div className="p-3 bg-zinc-950/80 flex items-center justify-between border-b border-zinc-800">
+                <button
+                  id="file-manager-select-all-mobile"
+                  onClick={toggleSelectAll}
+                  className="flex items-center gap-2 text-xs text-zinc-300 font-medium cursor-pointer"
+                >
+                  {allSelected ? (
+                    <CheckSquare className="h-4 w-4 text-amber-400" />
+                  ) : someSelected ? (
+                    <div className="h-4 w-4 rounded bg-amber-400/30 border border-amber-400 flex items-center justify-center">
+                      <div className="h-1.5 w-2 bg-amber-400 rounded-xs" />
+                    </div>
+                  ) : (
+                    <Square className="h-4 w-4 text-zinc-500" />
+                  )}
+                  <span>Select All</span>
+                </button>
+                <span className="text-[11px] text-zinc-500 font-mono">{files.length} items</span>
+              </div>
+
+              {files.map((file) => {
+                const isSelected = selectedPaths.includes(file.path);
+                const isZip = file.extension?.toLowerCase() === '.zip';
+
+                return (
+                  <div
+                    key={file.path}
+                    className={`p-3.5 space-y-2.5 transition-colors ${
+                      isSelected ? 'bg-amber-500/10' : 'hover:bg-zinc-900/60'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2.5">
+                      <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                        <button
+                          onClick={() => toggleSelectPath(file.path)}
+                          className="mt-0.5 p-1 text-zinc-400 hover:text-white rounded cursor-pointer"
+                          aria-label={`Select ${file.name}`}
+                        >
+                          {isSelected ? (
+                            <CheckSquare className="h-4 w-4 text-amber-400" />
+                          ) : (
+                            <Square className="h-4 w-4 text-zinc-500" />
+                          )}
+                        </button>
+                        <div
+                          onClick={() => handleItemClick(file)}
+                          className="flex items-start gap-2 cursor-pointer min-w-0 flex-1"
+                        >
+                          <div className="mt-0.5">{getFileIcon(file)}</div>
+                          <div className="min-w-0 flex-1">
+                            <p className={`text-xs break-all font-medium leading-tight ${file.isDir ? 'text-amber-300 font-bold' : 'text-zinc-200'}`}>
+                              {file.name}
+                            </p>
+                            <p className="text-[10px] text-zinc-500 font-mono mt-0.5">
+                              {file.isDir ? 'Folder' : formatSize(file.size)} • {formatDate(file.updatedAt)}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Mobile Action Row with 44px min tap targets */}
+                    <div className="flex items-center justify-end gap-1 pt-1 border-t border-zinc-800/40">
+                      {!file.isDir && (
+                        <button
+                          onClick={() => handleDownload(file)}
+                          className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-zinc-800/80 text-zinc-300 active:bg-zinc-700 transition-colors"
+                          title="Download File"
+                        >
+                          <Download className="h-4 w-4" />
+                        </button>
+                      )}
+
+                      {isZip && (
+                        <button
+                          onClick={() => handleDecompress(file)}
+                          className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400 active:bg-emerald-500/20 transition-colors"
+                          title="Extract ZIP Archive"
+                        >
+                          <Archive className="h-4 w-4" />
+                        </button>
+                      )}
+
+                      <button
+                        onClick={() => {
+                          setRenameTarget(file);
+                          setRenameValue(file.name);
+                        }}
+                        className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-zinc-800/80 text-zinc-300 active:bg-zinc-700 transition-colors"
+                        title="Rename"
+                      >
+                        <Edit3 className="h-4 w-4" />
+                      </button>
+
+                      <button
+                        onClick={() => setDeleteTargets([file])}
+                        className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-rose-500/10 text-rose-400 active:bg-rose-500/20 transition-colors"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop / Tablet Table View (>= sm screens) */}
+            <div className="hidden sm:block overflow-x-auto">
+              <table className="w-full text-left text-xs min-w-[650px]">
+                <thead className="bg-zinc-950 border-b border-zinc-800 text-zinc-400 font-mono text-[11px]">
+                  <tr>
+                    <th className="p-3.5 w-10 text-center">
+                      <button
+                        id="file-manager-select-all-btn"
+                        onClick={toggleSelectAll}
+                        className="p-1 text-zinc-400 hover:text-white rounded transition-colors cursor-pointer"
+                        aria-label={allSelected ? 'Deselect all files' : 'Select all files'}
+                      >
+                        {allSelected ? (
+                          <CheckSquare className="h-4 w-4 text-amber-400" />
+                        ) : someSelected ? (
+                          <div className="h-4 w-4 rounded bg-amber-400/30 border border-amber-400 flex items-center justify-center">
+                            <div className="h-1.5 w-2 bg-amber-400 rounded-xs" />
+                          </div>
+                        ) : (
+                          <Square className="h-4 w-4" />
+                        )}
+                      </button>
+                    </th>
+                    <th className="p-3.5">Name</th>
+                    <th className="p-3.5">Size</th>
+                    <th className="p-3.5">Last Modified</th>
+                    <th className="p-3.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60 font-mono">
+                  {files.map((file) => {
+                    const isSelected = selectedPaths.includes(file.path);
+                    const isZip = file.extension?.toLowerCase() === '.zip';
+
+                    return (
+                      <tr
+                        key={file.path}
+                        className={`transition-colors ${
+                          isSelected ? 'bg-amber-500/10' : 'hover:bg-zinc-900/80'
+                        }`}
+                      >
+                        {/* Checkbox */}
+                        <td className="p-3.5 text-center">
+                          <button
+                            onClick={() => toggleSelectPath(file.path)}
+                            className="p-1 text-zinc-400 hover:text-white rounded transition-colors cursor-pointer"
+                            aria-label={`Select ${file.name}`}
+                          >
+                            {isSelected ? (
+                              <CheckSquare className="h-4 w-4 text-amber-400" />
+                            ) : (
+                              <Square className="h-4 w-4" />
+                            )}
+                          </button>
+                        </td>
+
+                        {/* Name & Type */}
+                        <td className="p-3.5 font-sans">
+                          <div
+                            onClick={() => handleItemClick(file)}
+                            className="flex items-center gap-2.5 cursor-pointer text-zinc-200 hover:text-white group"
+                          >
+                            {getFileIcon(file)}
+                            <span className={`text-xs ${file.isDir ? 'font-semibold text-amber-300 group-hover:text-amber-200' : 'text-zinc-200'}`}>
+                              {file.name}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* Size */}
+                        <td className="p-3.5 text-zinc-400 text-[11px]">
+                          {file.isDir ? '—' : formatSize(file.size)}
+                        </td>
+
+                        {/* Date */}
+                        <td className="p-3.5 text-zinc-400 text-[11px]">
+                          {formatDate(file.updatedAt)}
+                        </td>
+
+                        {/* Actions */}
+                        <td className="p-3.5 text-right font-sans">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {!file.isDir && (
+                              <button
+                                onClick={() => handleDownload(file)}
+                                className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                                title="Download File"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+
+                            {isZip && (
+                              <button
+                                onClick={() => handleDecompress(file)}
+                                className="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 transition-colors cursor-pointer"
+                                title="Extract ZIP Archive"
+                              >
+                                <Archive className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+
+                            <button
+                              onClick={() => {
+                                setRenameTarget(file);
+                                setRenameValue(file.name);
+                              }}
+                              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                              title="Rename"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </button>
+
+                            <button
+                              onClick={() => setDeleteTargets([file])}
+                              className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 transition-colors cursor-pointer"
+                              title="Delete"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Upload Tasks Drawer */}
+      {showUploadDrawer && uploadTasks.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-50 w-80 sm:w-96 bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl p-4 space-y-3 animate-in fade-in slide-in-from-bottom-5">
+          <div className="flex items-center justify-between border-b border-zinc-800 pb-2.5">
+            <h4 className="text-xs font-bold text-white flex items-center gap-2">
+              <Upload className="h-4 w-4 text-amber-400" /> Upload Activity
+            </h4>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setUploadTasks(prev => prev.filter(t => t.status === 'uploading'))}
+                className="text-[11px] text-zinc-400 hover:text-white cursor-pointer"
+              >
+                Clear Done
+              </button>
+              <button
+                onClick={() => setShowUploadDrawer(false)}
+                className="text-zinc-400 hover:text-white p-1"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="max-h-56 overflow-y-auto space-y-2 font-mono text-xs">
+            {uploadTasks.map(t => (
+              <div key={t.id} className="p-2.5 bg-zinc-950 rounded-xl border border-zinc-800 space-y-1.5">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-white truncate max-w-[180px]">{t.name}</span>
+                  <span className="text-zinc-500">{formatSize(t.size)}</span>
+                </div>
+
+                <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-300 ${
+                      t.status === 'completed'
+                        ? 'bg-emerald-500'
+                        : t.status === 'error'
+                        ? 'bg-rose-500'
+                        : 'bg-amber-400'
+                    }`}
+                    style={{ width: `${t.progress}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className={
+                    t.status === 'completed' ? 'text-emerald-400' :
+                    t.status === 'error' ? 'text-rose-400' : 'text-amber-400'
+                  }>
+                    {t.status === 'completed' ? 'Uploaded' : t.status === 'error' ? (t.error || 'Failed') : 'Uploading...'}
+                  </span>
+                  {t.status === 'error' && (
+                    <button
+                      onClick={() => processUploadQueue([t])}
+                      className="text-amber-400 hover:underline cursor-pointer"
+                    >
+                      Retry
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* File Editor Modal */}
+      {editingFile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-3xl p-5 max-w-5xl w-full h-[88vh] flex flex-col space-y-4 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400">
+                  <FileCode className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-extrabold text-white">{editingFile.name}</h3>
+                    <span className="px-1.5 py-0.5 rounded-md text-[9px] font-mono font-bold bg-zinc-800 text-zinc-400 uppercase tracking-wider">
+                      {editingFile.extension?.replace('.', '') || 'txt'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] font-mono text-zinc-500 mt-0.5">{editingFile.path}</p>
+                </div>
+              </div>
+
+              {/* Editor Actions & Theme Selector */}
+              <div className="flex flex-wrap items-center gap-2.5">
+                {/* Visual Style Selector */}
+                <div className="flex items-center gap-1.5 bg-zinc-950 border border-zinc-850 p-1 rounded-xl text-[10px] font-mono">
+                  <span className="text-zinc-500 pl-1.5 pr-0.5 font-bold">THEME:</span>
+                  {(['obsidian', 'midnight', 'laser', 'emerald'] as const).map(style => (
+                    <button
+                      key={style}
+                      type="button"
+                      onClick={() => setEditorStyle(style)}
+                      className={`px-2 py-1 rounded-lg capitalize font-bold transition-all cursor-pointer ${
+                        editorStyle === style
+                          ? 'bg-zinc-800 text-white shadow-sm'
+                          : 'text-zinc-500 hover:text-zinc-300'
+                      }`}
+                    >
+                      {style}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleValidateSyntax}
+                  className="px-3 py-2 rounded-xl bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-cyan-400 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Validate Structure</span>
+                </button>
+
+                <button
+                  onClick={handleSaveFile}
+                  disabled={isSavingContent}
+                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+                >
+                  {isSavingContent ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                  <span>Save</span>
+                </button>
+
+                <button
+                  onClick={() => setEditingFile(null)}
+                  className="p-2 text-zinc-400 hover:text-white rounded-xl bg-zinc-800 hover:bg-zinc-700 cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Validation Banner Indicator */}
+            {syntaxStatus && (
+              <div className={`p-3 rounded-2xl border text-xs flex items-center gap-2 font-mono ${
+                syntaxStatus.success
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 animate-in fade-in'
+                  : 'bg-rose-500/10 border-rose-500/30 text-rose-400 animate-bounce'
+              }`}>
+                {syntaxStatus.success ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <AlertCircle className="h-4 w-4 shrink-0 animate-pulse" />}
+                <span>{syntaxStatus.message}</span>
+              </div>
+            )}
+
+            {/* Code Editor Body */}
+            <div className={`flex-1 min-h-0 rounded-2xl border overflow-hidden relative flex transition-all duration-300 ${
+              (() => {
+                switch (editorStyle) {
+                  case 'midnight': return 'bg-[#030712] border-cyan-950';
+                  case 'laser': return 'bg-[#0a0512] border-fuchsia-950';
+                  case 'emerald': return 'bg-[#021f18] border-emerald-950';
+                  case 'obsidian':
+                  default: return 'bg-zinc-950 border-zinc-800';
+                }
+              })()
+            }`}>
+              {isLoadingContent ? (
+                <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-400 gap-2">
+                  <Loader2 className="h-5 w-5 animate-spin text-amber-400" />
+                  <span>Loading file content...</span>
+                </div>
+              ) : (
+                <React.Fragment>
+                  {/* Sync Line Numbers Sidebar */}
+                  <div
+                    ref={lineNumbersRef}
+                    className={`w-12 select-none text-right pr-3.5 py-4 font-mono text-[11px] border-r overflow-hidden leading-relaxed text-zinc-600 border-zinc-850 ${
+                      (() => {
+                        switch (editorStyle) {
+                          case 'midnight': return 'bg-cyan-950/15 border-cyan-950 text-cyan-600/70';
+                          case 'laser': return 'bg-fuchsia-950/15 border-fuchsia-950 text-fuchsia-600/70';
+                          case 'emerald': return 'bg-emerald-950/15 border-emerald-950 text-emerald-600/70';
+                          case 'obsidian':
+                          default: return 'bg-zinc-950/40 border-zinc-900 text-zinc-650';
+                        }
+                      })()
+                    }`}
+                    style={{ scrollbarWidth: 'none' }}
+                  >
+                    {fileContent.split('\n').map((_, idx) => (
+                      <div key={idx} className="h-5">{idx + 1}</div>
+                    ))}
+                  </div>
+
+                  {/* Code Editor Area */}
+                  <textarea
+                    ref={textareaRef}
+                    value={fileContent}
+                    onScroll={handleEditorScroll}
+                    onChange={e => setFileContent(e.target.value)}
+                    className={`flex-1 h-full p-4 pl-3 font-mono text-[11px] resize-none focus:outline-none leading-relaxed h-full overflow-y-auto overflow-x-auto ${
+                      (() => {
+                        switch (editorStyle) {
+                          case 'midnight': return 'text-cyan-200 caret-cyan-400';
+                          case 'laser': return 'text-fuchsia-200 caret-fuchsia-400';
+                          case 'emerald': return 'text-emerald-200 caret-emerald-400';
+                          case 'obsidian':
+                          default: return 'text-zinc-200 caret-amber-400';
+                        }
+                      })()
+                    }`}
+                    placeholder="File is empty..."
+                  />
+                </React.Fragment>
+              )}
+            </div>
+
+            {/* Custom Developer HUD Status overlay */}
+            <div className="flex items-center justify-between px-3 py-2 border border-zinc-800 bg-zinc-950/30 rounded-xl text-[10px] font-mono text-zinc-500">
+              <div className="flex items-center gap-3">
+                <span>UTF-8</span>
+                <span>·</span>
+                <span className="text-zinc-400 font-bold">Lines: {fileContent.split('\n').length}</span>
+                <span>·</span>
+                <span className="text-zinc-400 font-bold">Length: {fileContent.length} chars</span>
+              </div>
+              <div className="flex items-center gap-1.5 uppercase font-bold text-amber-500">
+                <Sparkles className="h-3 w-3 animate-pulse" />
+                <span>IDE Code HUD</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal (Single & Bulk) */}
+      {deleteTargets && deleteTargets.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <div className="bg-zinc-900 border border-rose-500/30 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-2xl text-rose-400">
+                  <AlertTriangle className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    {deleteTargets.length === 1 ? 'Delete Item' : `Delete ${deleteTargets.length} Items`}
+                  </h3>
+                  <p className="text-xs text-zinc-400">Irreversible File Operation</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setDeleteTargets(null)}
+                className="text-zinc-500 hover:text-white p-1"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Are you sure you want to permanently delete{' '}
+              {deleteTargets.length === 1 ? (
+                <strong>'{deleteTargets[0].name}'</strong>
+              ) : (
+                <strong>{deleteTargets.length} selected items</strong>
+              )}?
+            </p>
+
+            {deleteTargets.some(t => t.isDir) && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-300 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
+                <span>Warning: Deleting a folder will permanently delete all of its contents.</span>
+              </div>
+            )}
+
+            <div className="max-h-36 overflow-y-auto p-3 bg-zinc-950 rounded-2xl border border-zinc-800 divide-y divide-zinc-850 font-mono text-xs">
+              {deleteTargets.map(t => (
+                <div key={t.path} className="py-1.5 flex items-center justify-between text-[11px]">
+                  <span className="text-white truncate max-w-[220px]">{t.name}</span>
+                  <span className="text-zinc-500">{t.isDir ? 'Folder' : formatSize(t.size)}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setDeleteTargets(null)}
+                disabled={isDeleting}
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={executeDelete}
+                disabled={isDeleting}
+                className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold flex items-center gap-2 shadow-lg shadow-rose-950/30 cursor-pointer disabled:opacity-50"
+              >
+                {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                <span>Delete Permanently</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Move & Copy Destination Modal */}
+      {moveCopyAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                {moveCopyAction.mode === 'move' ? (
+                  <ArrowRightLeft className="h-5 w-5 text-amber-400" />
+                ) : (
+                  <Copy className="h-5 w-5 text-violet-400" />
+                )}
+                <span>{moveCopyAction.mode === 'move' ? 'Move' : 'Copy'} {moveCopyAction.sources.length} Item(s)</span>
+              </h3>
+              <button
+                onClick={() => setMoveCopyAction(null)}
+                className="text-zinc-500 hover:text-white p-1"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-zinc-400 mb-1.5">Destination Directory</label>
+                <input
+                  type="text"
+                  value={destDir}
+                  onChange={e => setDestDir(e.target.value)}
+                  placeholder="/ or /plugins"
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              {availableDirs.length > 1 && (
+                <div>
+                  <label className="block text-[11px] text-zinc-500 mb-1">Quick Select Folder:</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {availableDirs.map(d => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => setDestDir(d)}
+                        className={`px-2 py-1 rounded-lg text-[11px] font-mono border cursor-pointer ${
+                          destDir === d
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                            : 'bg-zinc-800/80 text-zinc-400 border-zinc-700 hover:text-white'
+                        }`}
+                      >
+                        {d}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs text-zinc-400 mb-1.5">Conflict Resolution</label>
+                <select
+                  value={conflictStrategy}
+                  onChange={e => setConflictStrategy(e.target.value as any)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-amber-500 cursor-pointer"
+                >
+                  <option value="replace">Overwrite / Replace existing</option>
+                  <option value="rename">Keep Both (auto-rename with counter)</option>
+                  <option value="skip">Skip conflicting files</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setMoveCopyAction(null)}
+                disabled={isMovingOrCopying}
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={executeMoveOrCopy}
+                disabled={isMovingOrCopying}
+                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold flex items-center gap-2 shadow-lg shadow-amber-950/20 cursor-pointer disabled:opacity-50"
+              >
+                {isMovingOrCopying ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : moveCopyAction.mode === 'move' ? (
+                  <ArrowRightLeft className="h-4 w-4" />
+                ) : (
+                  <Copy className="h-4 w-4" />
+                )}
+                <span>Confirm {moveCopyAction.mode === 'move' ? 'Move' : 'Copy'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Compress ZIP Modal */}
+      {compressTargets && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <form onSubmit={executeCompress} className="bg-zinc-900 border border-zinc-700 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Archive className="h-5 w-5 text-emerald-400" />
+                <span>Compress {compressTargets.length} Item(s)</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setCompressTargets(null)}
+                className="text-zinc-500 hover:text-white p-1"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-xs text-zinc-400 mb-1.5">Archive Filename (.zip)</label>
+              <input
+                type="text"
+                value={archiveName}
+                onChange={e => setArchiveName(e.target.value)}
+                placeholder="archive.zip"
+                autoFocus
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-amber-500"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setCompressTargets(null)}
+                disabled={isCompressing}
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isCompressing}
+                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-2 shadow-lg shadow-emerald-950/20 cursor-pointer disabled:opacity-50"
+              >
+                {isCompressing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
+                <span>Create ZIP</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* New File Modal */}
+      {showNewFileModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <form onSubmit={handleCreateFile} className="bg-zinc-900 border border-zinc-700 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <FilePlus className="h-5 w-5 text-amber-400" />
+                <span>Create New File</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowNewFileModal(false)}
+                className="text-zinc-500 hover:text-white p-1"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-xs text-zinc-400 mb-1.5">File Name</label>
+              <input
+                type="text"
+                value={newFileName}
+                onChange={e => setNewFileName(e.target.value)}
+                placeholder="server.properties"
+                autoFocus
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-amber-500"
+              />
+              <p className="text-[10px] text-zinc-500 mt-1">Will be created in {currentPath}</p>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowNewFileModal(false)}
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!newFileName.trim()}
+                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold flex items-center gap-2 shadow-lg shadow-amber-950/20 cursor-pointer disabled:opacity-50"
+              >
+                <Plus className="h-4 w-4" />
+                <span>Create File</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* New Folder Modal */}
+      {showNewFolderModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <form onSubmit={handleCreateFolder} className="bg-zinc-900 border border-zinc-700 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <FolderPlus className="h-5 w-5 text-amber-400" />
+                <span>Create New Folder</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowNewFolderModal(false)}
+                className="text-zinc-500 hover:text-white p-1"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-xs text-zinc-400 mb-1.5">Folder Name</label>
+              <input
+                type="text"
+                value={newFolderName}
+                onChange={e => setNewFolderName(e.target.value)}
+                placeholder="plugins"
+                autoFocus
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-amber-500"
+              />
+              <p className="text-[10px] text-zinc-500 mt-1">Will be created in {currentPath}</p>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowNewFolderModal(false)}
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!newFolderName.trim()}
+                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold flex items-center gap-2 shadow-lg shadow-amber-950/20 cursor-pointer disabled:opacity-50"
+              >
+                <Plus className="h-4 w-4" />
+                <span>Create Folder</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Rename Modal */}
+      {renameTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <form onSubmit={handleRename} className="bg-zinc-900 border border-zinc-700 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Edit3 className="h-5 w-5 text-amber-400" />
+                <span>Rename Item</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setRenameTarget(null)}
+                className="text-zinc-500 hover:text-white p-1"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-xs text-zinc-400 mb-1.5">New Name</label>
+              <input
+                type="text"
+                value={renameValue}
+                onChange={e => setRenameValue(e.target.value)}
+                autoFocus
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-amber-500"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setRenameTarget(null)}
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!renameValue.trim() || renameValue.trim() === renameTarget.name}
+                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold flex items-center gap-2 shadow-lg shadow-amber-950/20 cursor-pointer disabled:opacity-50"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                <span>Rename</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Remote File URL Downloader Modal */}
+      {showRemoteDownloadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-3xl p-6 max-w-lg w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2.5 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+                  <DownloadCloud className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>Remote File URL Downloader</span>
+                    <Sparkles className="h-4 w-4 text-amber-400" />
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    Directly pull files from remote links straight into server storage
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeRemoteJob && activeRemoteJob.status === 'downloading') {
+                    if (!confirm('Download is in progress. Are you sure you want to close?')) return;
+                  }
+                  setShowRemoteDownloadModal(false);
+                }}
+                className="text-zinc-500 hover:text-white p-1 rounded-lg hover:bg-zinc-800 transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Quick Provider Badges */}
+            <div className="flex flex-wrap gap-1.5">
+              <span className="px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-medium">Google Drive</span>
+              <span className="px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] font-medium">MediaFire</span>
+              <span className="px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 text-[10px] font-medium">Discord Attachments</span>
+              <span className="px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20 text-[10px] font-medium">GitHub Releases</span>
+              <span className="px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-[10px] font-medium">Dropbox</span>
+              <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-medium">Direct ZIP / JAR URLs</span>
+            </div>
+
+            {!activeRemoteJob || activeRemoteJob.status === 'pending' ? (
+              <form onSubmit={handleStartRemoteDownload} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300 mb-1.5 flex items-center justify-between">
+                    <span>Direct File / Shared Link URL</span>
+                    <span className="text-[10px] text-cyan-400 font-mono">http:// or https://</span>
+                  </label>
+                  <div className="relative">
+                    <Link className="h-4 w-4 absolute left-3.5 top-3 text-zinc-500" />
+                    <input
+                      type="url"
+                      value={remoteUrl}
+                      onChange={e => setRemoteUrl(e.target.value)}
+                      placeholder="https://drive.google.com/file/d/... or https://mediafire.com/file/... or .zip URL"
+                      required
+                      autoFocus
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl pl-10 pr-3.5 py-2.5 text-xs text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-cyan-500 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                      Save Location
+                    </label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={currentPath}
+                      className="w-full bg-zinc-950/60 border border-zinc-800/80 rounded-xl px-3.5 py-2 text-xs text-amber-400 font-mono cursor-not-allowed"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                      Custom Filename <span className="text-[10px] text-zinc-500">(Optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={remoteFilename}
+                      onChange={e => setRemoteFilename(e.target.value)}
+                      placeholder="e.g. server_files.zip"
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-cyan-500 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-3 bg-zinc-950/80 border border-zinc-800 rounded-2xl flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    id="auto-extract-checkbox"
+                    checked={autoExtractRemote}
+                    onChange={e => setAutoExtractRemote(e.target.checked)}
+                    className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-cyan-500 focus:ring-cyan-500/20 cursor-pointer"
+                  />
+                  <label htmlFor="auto-extract-checkbox" className="text-xs text-zinc-300 cursor-pointer select-none">
+                    <span className="font-semibold text-white">Auto-extract archive</span>
+                    <span className="block text-[11px] text-zinc-500">Automatically uncompress .zip archives directly into target directory</span>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowRemoteDownloadModal(false)}
+                    className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!remoteUrl.trim() || isStartingRemoteDownload}
+                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold flex items-center gap-2 shadow-lg shadow-amber-950/20 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isStartingRemoteDownload ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <DownloadCloud className="h-4 w-4" />
+                    )}
+                    <span>{isStartingRemoteDownload ? 'Initiating...' : 'Download to Server'}</span>
+                  </button>
+                </div>
+              </form>
+            ) : (
+              /* Download Progress View */
+              <div className="space-y-4 py-2">
+                <div className="p-4 bg-zinc-950 border border-cyan-500/30 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 overflow-hidden pr-2">
+                      {activeRemoteJob.status === 'downloading' || activeRemoteJob.status === 'extracting' ? (
+                        <Loader2 className="h-4 w-4 text-cyan-400 animate-spin shrink-0" />
+                      ) : activeRemoteJob.status === 'completed' ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                      ) : (
+                        <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
+                      )}
+                      <span className="text-xs font-bold text-white font-mono truncate">
+                        {activeRemoteJob.filename}
+                      </span>
+                    </div>
+                    <span className="text-xs font-bold font-mono text-cyan-400 shrink-0">
+                      {activeRemoteJob.progress}%
+                    </span>
+                  </div>
+
+                  {/* Progress Bar */}
+                  <div className="w-full bg-zinc-800 rounded-full h-2.5 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-300 ${
+                        activeRemoteJob.status === 'completed'
+                          ? 'bg-emerald-500'
+                          : activeRemoteJob.status === 'error'
+                          ? 'bg-rose-500'
+                          : 'bg-gradient-to-r from-cyan-500 to-blue-500'
+                      }`}
+                      style={{ width: `${Math.max(5, activeRemoteJob.progress)}%` }}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 pt-1">
+                    <span>
+                      {activeRemoteJob.status === 'extracting'
+                        ? 'Uncompressing Archive...'
+                        : activeRemoteJob.status === 'completed'
+                        ? 'Download Finished!'
+                        : activeRemoteJob.status === 'error'
+                        ? `Error: ${activeRemoteJob.error}`
+                        : `${(activeRemoteJob.downloadedBytes / (1024 * 1024)).toFixed(2)} MB ${
+                            activeRemoteJob.totalBytes ? `/ ${(activeRemoteJob.totalBytes / (1024 * 1024)).toFixed(2)} MB` : ''
+                          }`}
+                    </span>
+                    {activeRemoteJob.speedBytesPerSec > 0 && activeRemoteJob.status === 'downloading' && (
+                      <span className="text-cyan-400">
+                        {(activeRemoteJob.speedBytesPerSec / (1024 * 1024)).toFixed(2)} MB/s
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {activeRemoteJob.status === 'completed' && (
+                  <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    <span>File saved to <strong>{currentPath}</strong></span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowRemoteDownloadModal(false);
+                      setActiveRemoteJob(null);
+                      setIsStartingRemoteDownload(false);
+                    }}
+                    className="px-5 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-semibold cursor-pointer"
+                  >
+                    {activeRemoteJob.status === 'completed' ? 'Close' : 'Dismiss'}
+                  </button>
+                  {['completed', 'error'].includes(activeRemoteJob.status) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveRemoteJob(null);
+                        setRemoteUrl('');
+                        setRemoteFilename('');
+                        setIsStartingRemoteDownload(false);
+                      }}
+                      className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      Download Another File
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Floating Resumable Upload Engine Drawer (5GB - 15GB+ Support) */}
+      {showUploadDrawer && uploadTasks.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-50 w-[420px] max-w-[calc(100vw-2rem)] bg-zinc-900/95 backdrop-blur-xl border border-zinc-700 rounded-2xl shadow-2xl shadow-black/80 overflow-hidden animate-in slide-in-from-bottom-5">
+          <div className="px-4 py-3 bg-zinc-800/80 border-b border-zinc-700 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Upload className="h-4 w-4 text-amber-400" />
+              <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                Resumable Uploads ({uploadTasks.filter(t => t.status === 'completed').length}/{uploadTasks.length})
+              </h4>
+            </div>
+            <button
+              onClick={() => setShowUploadDrawer(false)}
+              className="text-zinc-400 hover:text-white p-1 rounded-lg hover:bg-zinc-700 transition-colors"
+              title="Close Drawer"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="max-h-72 overflow-y-auto p-3 space-y-2.5">
+            {uploadTasks.map(task => {
+              const sizeFormatted = task.size > 1024 * 1024 * 1024
+                ? `${(task.size / (1024 * 1024 * 1024)).toFixed(2)} GB`
+                : `${(task.size / (1024 * 1024)).toFixed(1)} MB`;
+
+              return (
+                <div key={task.id} className="p-3 bg-zinc-950/70 border border-zinc-800 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-white truncate max-w-[220px]" title={task.name}>
+                      {task.name}
+                    </span>
+                    <span className="text-[11px] font-mono text-zinc-400">
+                      {sizeFormatted}
+                    </span>
+                  </div>
+
+                  {/* Progress Bar */}
+                  <div className="w-full bg-zinc-800 rounded-full h-2 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-300 ${
+                        task.status === 'completed'
+                          ? 'bg-emerald-500'
+                          : task.status === 'error'
+                          ? 'bg-rose-500'
+                          : task.status === 'paused'
+                          ? 'bg-amber-500'
+                          : 'bg-gradient-to-r from-amber-500 to-cyan-500'
+                      }`}
+                      style={{ width: `${Math.max(2, task.progress)}%` }}
+                    />
+                  </div>
+
+                  {/* Meta Details & Controls */}
+                  <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
+                    <div className="flex items-center gap-2">
+                      {task.status === 'uploading' && (
+                        <>
+                          <span className="text-cyan-400 font-bold">{task.speedMBs || 0} MB/s</span>
+                          <span>•</span>
+                          <span>ETA {task.etaSeconds ? `${task.etaSeconds}s` : 'calculating...'}</span>
+                        </>
+                      )}
+                      {task.status === 'paused' && (
+                        <span className="text-amber-400 font-bold">PAUSED</span>
+                      )}
+                      {task.status === 'completed' && (
+                        <span className="text-emerald-400 font-bold flex items-center gap-1">
+                          <CheckCircle2 className="h-3 w-3" /> Verified Complete
+                        </span>
+                      )}
+                      {task.status === 'error' && (
+                        <span className="text-rose-400 truncate max-w-[200px]" title={task.error}>
+                          {task.error || 'Failed'}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {task.totalChunks && task.totalChunks > 1 && (
+                        <span className="text-[10px] text-zinc-500">
+                          Chunk {task.currentChunk || 0}/{task.totalChunks}
+                        </span>
+                      )}
+                      {(task.status === 'uploading' || task.status === 'paused') && (
+                        <button
+                          onClick={() => togglePauseTask(task.id)}
+                          className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors"
+                          title={task.status === 'paused' ? 'Resume Upload' : 'Pause Upload'}
+                        >
+                          {task.status === 'paused' ? (
+                            <Play className="h-3 w-3 text-emerald-400" />
+                          ) : (
+                            <Pause className="h-3 w-3 text-amber-400" />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

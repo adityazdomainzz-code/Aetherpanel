@@ -1,0 +1,424 @@
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { THEME_PRESETS, FONT_OPTIONS, ThemePreset, FontOption } from './theme';
+import { CustomThemeSettings } from '../types';
+import { apiRequest } from './api';
+
+export type AccentColor = 'amber' | 'emerald' | 'cyan' | 'violet' | 'rose' | 'blue';
+export type ThemeMode = 'dark' | 'light';
+
+interface ThemeContextType {
+  theme: ThemeMode;
+  activeThemeId: string;
+  activePreset: ThemePreset;
+  activeFontId: string;
+  activeFont: FontOption;
+  accent: AccentColor;
+  customCursorEnabled: boolean;
+  animationsEnabled: boolean;
+  adsEnabled: boolean;
+  allowUserCustomization: boolean;
+  backgroundBlur: string;
+  backgroundOverlayOpacity: number;
+  themeAssets: {
+    logoUrl?: string;
+    faviconUrl?: string;
+    bgPatternUrl?: string;
+    backgroundWallpaperUrl?: string;
+    bannerUrl?: string;
+    loginBgUrl?: string;
+  };
+  setTheme: (mode: ThemeMode) => void;
+  setActiveThemeId: (themeId: string) => void;
+  setActiveFontId: (fontId: string) => void;
+  setAccent: (accent: AccentColor) => void;
+  setCustomCursorEnabled: (enabled: boolean) => void;
+  setAnimationsEnabled: (enabled: boolean) => void;
+  setAdsEnabled: (enabled: boolean) => void;
+  setBackgroundBlur: (blur: string) => void;
+  setBackgroundOverlayOpacity: (opacity: number) => void;
+  setThemeAssets: (assets: Partial<ThemeContextType['themeAssets']>) => void;
+  applySystemThemeSettings: (settings: CustomThemeSettings) => void;
+  accentClasses: {
+    text: string;
+    bg: string;
+    border: string;
+    ring: string;
+    gradient: string;
+    shadow: string;
+  };
+}
+
+const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
+
+export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [theme, setThemeState] = useState<ThemeMode>(() => {
+    return (localStorage.getItem('aether_theme') as ThemeMode) || 'dark';
+  });
+
+  const [activeThemeId, setActiveThemeIdState] = useState<string>(() => {
+    return localStorage.getItem('aether_active_theme_id') || 'golden';
+  });
+
+  const [activeFontId, setActiveFontIdState] = useState<string>(() => {
+    return localStorage.getItem('aether_active_font_id') || 'Plus Jakarta Sans';
+  });
+
+  const [accent, setAccentState] = useState<AccentColor>(() => {
+    return (localStorage.getItem('aether_accent') as AccentColor) || 'amber';
+  });
+
+  const [themeAssets, setThemeAssetsState] = useState<ThemeContextType['themeAssets']>(() => {
+    try {
+      const saved = localStorage.getItem('aether_theme_assets');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const [customCursorEnabled, setCustomCursorState] = useState<boolean>(() => {
+    const val = localStorage.getItem('aether_custom_cursor');
+    return val !== null ? val === 'true' : false;
+  });
+
+  const [animationsEnabled, setAnimationsState] = useState<boolean>(() => {
+    const val = localStorage.getItem('aether_animations');
+    return val !== null ? val === 'true' : true;
+  });
+
+  const [adsEnabled, setAdsState] = useState<boolean>(() => {
+    const val = localStorage.getItem('aether_ads_enabled');
+    return val !== null ? val === 'true' : true;
+  });
+
+  const [allowUserCustomization, setAllowUserCustomization] = useState<boolean>(true);
+  const [backgroundBlur, setBackgroundBlurState] = useState<string>(() => {
+    return localStorage.getItem('aether_background_blur') || 'none';
+  });
+  const [backgroundOverlayOpacity, setBackgroundOverlayOpacityState] = useState<number>(() => {
+    const val = localStorage.getItem('aether_background_overlay_opacity');
+    return val !== null ? parseInt(val) : 75;
+  });
+
+  // Load system theme settings on initial boot from public endpoint
+  useEffect(() => {
+    const fetchSystemTheme = async () => {
+      try {
+        const res = await apiRequest('/public/theme-settings');
+        if (res.success && res.data) {
+          const sys = res.data as CustomThemeSettings;
+          setAllowUserCustomization(sys.allowUserCustomization);
+          
+          if (sys.backgroundBlur) {
+            setBackgroundBlurState(sys.backgroundBlur);
+          }
+          if (sys.backgroundOverlayOpacity !== undefined) {
+            setBackgroundOverlayOpacityState(sys.backgroundOverlayOpacity);
+          }
+
+          if (!sys.allowUserCustomization) {
+            // Force authoritative values from system settings, discarding client overrides
+            if (sys.activeThemeId) setActiveThemeIdState(sys.activeThemeId);
+            if (sys.activeFontId) setActiveFontIdState(sys.activeFontId);
+            if (sys.assets) setThemeAssetsState(sys.assets);
+          } else {
+            // Load custom settings from localStorage if user overrides exist
+            const localTheme = localStorage.getItem('aether_active_theme_id');
+            const localFont = localStorage.getItem('aether_active_font_id');
+            const localAssetsStr = localStorage.getItem('aether_theme_assets');
+            const localBlur = localStorage.getItem('aether_background_blur');
+            const localOpacity = localStorage.getItem('aether_background_overlay_opacity');
+
+            if (localTheme) setActiveThemeIdState(localTheme);
+            else if (sys.activeThemeId) setActiveThemeIdState(sys.activeThemeId);
+
+            if (localFont) setActiveFontIdState(localFont);
+            else if (sys.activeFontId) setActiveFontIdState(sys.activeFontId);
+
+            if (localBlur) setBackgroundBlurState(localBlur);
+            if (localOpacity) setBackgroundOverlayOpacityState(parseInt(localOpacity));
+
+            if (localAssetsStr) {
+              try {
+                setThemeAssetsState(JSON.parse(localAssetsStr));
+              } catch {
+                if (sys.assets) setThemeAssetsState(sys.assets);
+              }
+            } else if (sys.assets) {
+              setThemeAssetsState(sys.assets);
+            }
+          }
+        }
+      } catch {
+        // Fall back gracefully to localStorage
+      }
+    };
+    fetchSystemTheme();
+  }, []);
+
+  const activePreset = THEME_PRESETS.find(p => p.id === activeThemeId) || THEME_PRESETS[0];
+  const activeFont = FONT_OPTIONS.find(f => f.id === activeFontId) || FONT_OPTIONS[0];
+
+  // Apply Theme Mode class
+  useEffect(() => {
+    localStorage.setItem('aether_theme', theme);
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [theme]);
+
+  // Apply Theme CSS Variables & Colors
+  useEffect(() => {
+    localStorage.setItem('aether_active_theme_id', activeThemeId);
+    const root = document.documentElement;
+
+    root.style.setProperty('--color-accent', activePreset.accent);
+    root.style.setProperty('--color-accent-hover', activePreset.accentHover);
+    root.style.setProperty('--color-accent-glow', activePreset.glowColor);
+    root.style.setProperty('--color-accent-border', activePreset.borderColor);
+    root.style.setProperty('--color-badge-bg', activePreset.badgeBg);
+    root.style.setProperty('--color-badge-text', activePreset.badgeText);
+
+    // Map accent for legacy components
+    if (activeThemeId === 'golden') setAccentState('amber');
+    else if (activeThemeId === 'emerald') setAccentState('emerald');
+    else if (activeThemeId === 'midnight') setAccentState('cyan');
+    else if (activeThemeId === 'cyberpunk') setAccentState('violet');
+    else if (activeThemeId === 'crimson') setAccentState('rose');
+    else if (activeThemeId === 'sapphire') setAccentState('blue');
+  }, [activeThemeId, activePreset]);
+
+  // Apply Font Family
+  useEffect(() => {
+    localStorage.setItem('aether_active_font_id', activeFontId);
+    document.body.style.fontFamily = activeFont.fontFamily;
+  }, [activeFontId, activeFont]);
+
+  // Apply Favicon & Background Asset (Image / animated GIF, Blur control, Overlay opacity)
+  useEffect(() => {
+    localStorage.setItem('aether_theme_assets', JSON.stringify(themeAssets));
+
+    const favUrl = themeAssets.faviconUrl?.trim();
+    const targetFavicon = favUrl || '/favicon.svg';
+
+    // Query or create favicon link tags globally
+    let faviconLinks = Array.from(
+      document.querySelectorAll<HTMLLinkElement>("link[rel*='icon'], link[rel='apple-touch-icon']")
+    );
+
+    if (faviconLinks.length === 0) {
+      const link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+      faviconLinks = [link];
+    }
+
+    faviconLinks.forEach((link) => {
+      link.href = targetFavicon;
+      if (favUrl) {
+        link.removeAttribute('type');
+      } else {
+        link.setAttribute('type', 'image/svg+xml');
+      }
+    });
+
+    // Clean up any legacy dynamic background style tag to ensure GlobalBackground controls rendering
+    const legacyStyleTag = document.getElementById('aether-custom-bg-styles');
+    if (legacyStyleTag) {
+      legacyStyleTag.remove();
+    }
+  }, [themeAssets, backgroundBlur, backgroundOverlayOpacity]);
+
+  useEffect(() => {
+    localStorage.setItem('aether_custom_cursor', String(customCursorEnabled));
+  }, [customCursorEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('aether_animations', String(animationsEnabled));
+  }, [animationsEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('aether_ads_enabled', String(adsEnabled));
+  }, [adsEnabled]);
+
+  const setTheme = (mode: ThemeMode) => setThemeState(mode);
+  
+  const setActiveThemeId = (id: string) => {
+    if (!allowUserCustomization) return;
+    setActiveThemeIdState(id);
+  };
+  
+  const setActiveFontId = (id: string) => {
+    if (!allowUserCustomization) return;
+    setActiveFontIdState(id);
+  };
+  
+  const setAccent = (acc: AccentColor) => setAccentState(acc);
+  const setCustomCursorEnabled = (enabled: boolean) => setCustomCursorState(enabled);
+  const setAnimationsEnabled = (enabled: boolean) => setAnimationsState(enabled);
+  const setAdsEnabled = (enabled: boolean) => setAdsState(enabled);
+
+  const setBackgroundBlur = (blur: string) => {
+    if (!allowUserCustomization) return;
+    setBackgroundBlurState(blur);
+    localStorage.setItem('aether_background_blur', blur);
+  };
+
+  const setBackgroundOverlayOpacity = (opacity: number) => {
+    if (!allowUserCustomization) return;
+    setBackgroundOverlayOpacityState(opacity);
+    localStorage.setItem('aether_background_overlay_opacity', String(opacity));
+  };
+
+  const setThemeAssets = (assets: Partial<ThemeContextType['themeAssets']>) => {
+    if (!allowUserCustomization) return;
+    setThemeAssetsState(prev => {
+      const wallpaper = assets.backgroundWallpaperUrl || assets.bgPatternUrl || prev.backgroundWallpaperUrl || prev.bgPatternUrl;
+      const next = {
+        ...prev,
+        ...assets,
+        backgroundWallpaperUrl: wallpaper,
+        bgPatternUrl: wallpaper
+      };
+      localStorage.setItem('aether_theme_assets', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const applySystemThemeSettings = (settings: CustomThemeSettings) => {
+    // Admins can apply system theme settings globally
+    if (settings.activeThemeId) {
+      setActiveThemeIdState(settings.activeThemeId);
+      localStorage.setItem('aether_active_theme_id', settings.activeThemeId);
+    }
+    if (settings.activeFontId) {
+      setActiveFontIdState(settings.activeFontId);
+      localStorage.setItem('aether_active_font_id', settings.activeFontId);
+    }
+    if (settings.backgroundBlur) {
+      setBackgroundBlurState(settings.backgroundBlur);
+      localStorage.setItem('aether_background_blur', settings.backgroundBlur);
+    }
+    if (settings.backgroundOverlayOpacity !== undefined) {
+      setBackgroundOverlayOpacityState(settings.backgroundOverlayOpacity);
+      localStorage.setItem('aether_background_overlay_opacity', String(settings.backgroundOverlayOpacity));
+    }
+    if (settings.assets) {
+      const wallpaper = settings.assets.backgroundWallpaperUrl || settings.assets.bgPatternUrl;
+      const normalizedAssets = {
+        ...settings.assets,
+        backgroundWallpaperUrl: wallpaper,
+        bgPatternUrl: wallpaper
+      };
+      setThemeAssetsState(normalizedAssets);
+      localStorage.setItem('aether_theme_assets', JSON.stringify(normalizedAssets));
+    }
+    if (settings.allowUserCustomization !== undefined) {
+      setAllowUserCustomization(settings.allowUserCustomization);
+    }
+  };
+
+  const getAccentClasses = (): ThemeContextType['accentClasses'] => {
+    switch (activeThemeId) {
+      case 'emerald':
+        return {
+          text: 'text-emerald-400',
+          bg: 'bg-emerald-500',
+          border: 'border-emerald-500/30',
+          ring: 'focus:ring-emerald-500/50',
+          gradient: 'from-emerald-500 to-teal-600',
+          shadow: 'shadow-emerald-500/20'
+        };
+      case 'midnight':
+        return {
+          text: 'text-cyan-400',
+          bg: 'bg-cyan-500',
+          border: 'border-cyan-500/30',
+          ring: 'focus:ring-cyan-500/50',
+          gradient: 'from-cyan-500 to-blue-600',
+          shadow: 'shadow-cyan-500/20'
+        };
+      case 'cyberpunk':
+        return {
+          text: 'text-fuchsia-400',
+          bg: 'bg-fuchsia-500',
+          border: 'border-fuchsia-500/30',
+          ring: 'focus:ring-fuchsia-500/50',
+          gradient: 'from-fuchsia-500 via-purple-600 to-pink-500',
+          shadow: 'shadow-fuchsia-500/20'
+        };
+      case 'crimson':
+        return {
+          text: 'text-red-400',
+          bg: 'bg-red-500',
+          border: 'border-red-500/30',
+          ring: 'focus:ring-red-500/50',
+          gradient: 'from-rose-500 via-red-600 to-amber-600',
+          shadow: 'shadow-red-500/20'
+        };
+      case 'sapphire':
+        return {
+          text: 'text-blue-400',
+          bg: 'bg-blue-500',
+          border: 'border-blue-500/30',
+          ring: 'focus:ring-blue-500/50',
+          gradient: 'from-blue-500 to-indigo-600',
+          shadow: 'shadow-blue-500/20'
+        };
+      case 'golden':
+      default:
+        return {
+          text: 'text-amber-400',
+          bg: 'bg-amber-500',
+          border: 'border-amber-500/30',
+          ring: 'focus:ring-amber-500/50',
+          gradient: 'from-amber-500 via-yellow-500 to-amber-600',
+          shadow: 'shadow-amber-500/20'
+        };
+    }
+  };
+
+  return (
+    <ThemeContext.Provider
+      value={{
+        theme,
+        activeThemeId,
+        activePreset,
+        activeFontId,
+        activeFont,
+        accent,
+        customCursorEnabled,
+        animationsEnabled,
+        adsEnabled,
+        allowUserCustomization,
+        backgroundBlur,
+        backgroundOverlayOpacity,
+        themeAssets,
+        setTheme,
+        setActiveThemeId,
+        setActiveFontId,
+        setAccent,
+        setCustomCursorEnabled,
+        setAnimationsEnabled,
+        setAdsEnabled,
+        setBackgroundBlur,
+        setBackgroundOverlayOpacity,
+        setThemeAssets,
+        applySystemThemeSettings,
+        accentClasses: getAccentClasses()
+      }}
+    >
+      {children}
+    </ThemeContext.Provider>
+  );
+};
+
+export const useTheme = () => {
+  const context = useContext(ThemeContext);
+  if (!context) {
+    throw new Error('useTheme must be used within a ThemeProvider');
+  }
+  return context;
+};
