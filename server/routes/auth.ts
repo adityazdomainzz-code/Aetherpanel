@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { getDb, saveDbSync } from '../db';
 import { generateToken, authMiddleware, createAuditLog, AuthenticatedRequest, JWT_SECRET } from '../auth';
+import { WELCOME_CREDITS } from '../services/fundingPolicy';
 import { User, DiscordAccount } from '../../src/types';
 import { evaluateIpRisk, AntiAbuseConfig } from '../utils/ipRiskProvider';
 import { getDiscordOAuthRedirectUri, getCurrentInstallationPublicUrl } from '../oauthUrlResolver';
@@ -299,7 +300,7 @@ router.post('/register', async (req, res) => {
       baseServerAllocations: 1,
       adminGrantedAllocations: 0,
       serverLimit: 1,
-      credits: 10.0, // Welcome credit
+      credits: WELCOME_CREDITS, // Welcome credit (0 while only admins add credits)
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -582,7 +583,7 @@ router.post('/firebase-verify', async (req, res) => {
       baseServerAllocations: 1,
       adminGrantedAllocations: 0,
       serverLimit: 1,
-      credits: 10.0,
+      credits: WELCOME_CREDITS,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -712,7 +713,7 @@ router.post('/firebase-google', async (req, res) => {
       baseServerAllocations: 1,
       adminGrantedAllocations: 0,
       serverLimit: 1,
-      credits: 10.0, // Welcome credit
+      credits: WELCOME_CREDITS, // Welcome credit (0 while only admins add credits)
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -1069,7 +1070,7 @@ router.get('/discord/callback', async (req, res) => {
       baseServerAllocations: 1,
       adminGrantedAllocations: 0,
       serverLimit: 1,
-      credits: 10.0,
+      credits: WELCOME_CREDITS,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };

@@ -9,6 +9,8 @@ import { motion } from 'motion/react';
 import { ShieldAlert, RefreshCw, LogOut } from 'lucide-react';
 import { apiRequest } from './lib/api';
 import { Server } from './types';
+import { usePolicy, canDeploy } from './lib/policy';
+import { SelfServiceLocked } from './components/SelfServiceLocked';
 import { parseUrlToRoute, routeToUrl } from './lib/routing';
 
 // Components
@@ -72,6 +74,7 @@ import { AdminHomepageBuilder } from './pages/admin/AdminHomepageBuilder';
 
 function AppContent() {
   const { user, loading, logout } = useAuth();
+  const policy = usePolicy();
   const { brandName, maintenanceMode, maintenanceMessage, refreshBranding } = useBranding();
   const { settings, getTransitionProps, motionEnabled } = useAnimation();
   
@@ -330,7 +333,10 @@ function AppContent() {
                         <ServersList onNavigate={handleNavigate} />
                       </div>
                     )}
-                    {currentPage === 'deploy' && (
+                    {currentPage === 'deploy' && !canDeploy(user, policy) && (
+                      <SelfServiceLocked kind="deploy" onNavigate={handleNavigate} />
+                    )}
+                    {currentPage === 'deploy' && canDeploy(user, policy) && (
                       <ServerDeployWizard
                         onNavigate={handleNavigate}
                         onSelectServer={(sId) => handleNavigate('server-manage', { serverId: sId })}

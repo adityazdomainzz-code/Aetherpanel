@@ -172,6 +172,16 @@ export const AfkRewards: React.FC = () => {
     );
   }
 
+  if (settings && settings.enabled === false) {
+    return (
+      <div className="p-10 max-w-2xl mx-auto mt-6 rounded-3xl bg-zinc-900/80 border border-zinc-800 text-center space-y-3">
+        <ShieldCheck className="h-8 w-8 text-amber-400 mx-auto" />
+        <h2 className="text-lg font-bold text-white">AFK rewards are turned off</h2>
+        <p className="text-xs text-zinc-400 max-w-md mx-auto">Credits cannot be earned or added by users. An administrator adds credits to your account.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}

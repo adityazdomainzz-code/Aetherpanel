@@ -39,6 +39,39 @@ export const AdminServers: React.FC = () => {
   const [createDisk, setCreateDisk] = useState<number>(15);
   const [createError, setCreateError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  // user picker + plan (the plan price is taken from the user's credits)
+  const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [userSearch, setUserSearch] = useState('');
+  const [selectedUserId, setSelectedUserId] = useState<string>('');
+  const [allPlans, setAllPlans] = useState<any[]>([]);
+  const [allProducts, setAllProducts] = useState<any[]>([]);
+  const [createMode, setCreateMode] = useState<'plan' | 'custom'>('plan');
+  const [selectedPlanId, setSelectedPlanId] = useState<string>('');
+  const [createCycle, setCreateCycle] = useState<'monthly' | 'yearly'>('monthly');
+
+  const loadCreateData = async () => {
+    const [u, p, pr] = await Promise.all([apiRequest('/admin/users'), apiRequest('/admin/plans'), apiRequest('/admin/products')]);
+    if (u.success && u.data) setAllUsers(u.data);
+    if (p.success && p.data) setAllPlans(p.data);
+    if (pr.success && pr.data) setAllProducts(pr.data);
+  };
+  const openCreateModal = () => { setCreateError(null); setShowCreateModal(true); loadCreateData(); };
+
+  const selectedUser = allUsers.find((u) => u.id === selectedUserId) || null;
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    const list = q ? allUsers.filter((u) => [u.email, u.username, u.displayName, u.id].some((v) => String(v || '').toLowerCase().includes(q))) : allUsers;
+    return list.slice(0, 50);
+  }, [allUsers, userSearch]);
+  const planCategory = (plan: any) => {
+    const prod = allProducts.find((p) => p.id === plan.productId);
+    return prod?.category || (String(plan.id).includes('bot') ? 'bot' : 'minecraft');
+  };
+  const categoryPlans = allPlans.filter((p) => p.isActive && planCategory(p) === createCategory);
+  const selectedPlan = allPlans.find((p) => p.id === selectedPlanId) || null;
+  const planPrice = selectedPlan ? Number(createCycle === 'yearly' ? selectedPlan.priceYearly : selectedPlan.priceMonthly) || 0 : 0;
+  const userBalance = Number(selectedUser?.credits || 0);
+  const notEnough = createMode === 'plan' && !!selectedPlan && !!selectedUser && planPrice > userBalance;
 
   useEffect(() => {
     fetchAllServers();
@@ -84,8 +117,16 @@ export const AdminServers: React.FC = () => {
   const handleAdminCreateServer = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreateError(null);
-    if (!createEmail || !createServerName) {
-      setCreateError('User email and server name are required.');
+    if (!selectedUser || !createServerName) {
+      setCreateError('Choose a user from the list and enter a server name.');
+      return;
+    }
+    if (createMode === 'plan' && !selectedPlan) {
+      setCreateError('Choose a plan - its price is taken from the user\'s credits.');
+      return;
+    }
+    if (notEnough) {
+      setCreateError(`${selectedUser.email} has only $${userBalance.toFixed(2)} - this plan costs $${planPrice.toFixed(2)}. Add credits first (Admin -> Users).`);
       return;
     }
 
@@ -93,14 +134,14 @@ export const AdminServers: React.FC = () => {
     const res = await apiRequest('/admin/servers/create', {
       method: 'POST',
       body: JSON.stringify({
-        userEmail: createEmail,
+        userId: selectedUser.id,
         name: createServerName,
         hostingCategory: createCategory,
         software: createSoftware,
         version: createVersion,
-        ramMB: createRam,
-        cpuCores: createCpu,
-        diskGB: createDisk
+        ...(createMode === 'plan'
+          ? { planId: selectedPlan.id, billingCycle: createCycle }
+          : { ramMB: createRam, cpuCores: createCpu, diskGB: createDisk })
       })
     });
     setIsCreating(false);
@@ -109,6 +150,9 @@ export const AdminServers: React.FC = () => {
       toast.success(res.message || 'Server provisioned and delivered successfully.');
       setShowCreateModal(false);
       setCreateEmail('');
+      setSelectedUserId('');
+      setUserSearch('');
+      setSelectedPlanId('');
       setCreateServerName('Custom Server');
       fetchAllServers();
     } else {
@@ -317,7 +361,7 @@ export const AdminServers: React.FC = () => {
             />
           </div>
           <button
-            onClick={() => setShowCreateModal(true)}
+            onClick={openCreateModal}
             className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all shadow-lg shadow-amber-500/20 cursor-pointer whitespace-nowrap"
           >
             <ServerIcon className="h-4 w-4" />
@@ -632,7 +676,7 @@ export const AdminServers: React.FC = () => {
       {/* Admin Create Server Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="bg-zinc-900 border border-amber-500/30 rounded-3xl p-6 max-w-lg w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95">
+          <div className="bg-zinc-900 border border-amber-500/30 rounded-3xl p-6 max-w-2xl w-full space-y-5 shadow-2xl animate-in fade-in zoom-in-95 max-h-[92vh] overflow-y-auto">
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-3">
                 <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-amber-400">
@@ -640,7 +684,7 @@ export const AdminServers: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white">Admin Provision Server</h3>
-                  <p className="text-xs text-amber-400 font-semibold">Assign custom specs & deliver to user account</p>
+                  <p className="text-xs text-amber-400 font-semibold">Pick a user and a plan - the plan price is taken from their credits</p>
                 </div>
               </div>
               <button
@@ -660,15 +704,55 @@ export const AdminServers: React.FC = () => {
 
             <form onSubmit={handleAdminCreateServer} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-zinc-300 mb-1">User Account Email *</label>
-                <input
-                  type="email"
-                  required
-                  value={createEmail}
-                  onChange={(e) => setCreateEmail(e.target.value)}
-                  placeholder="user@example.com"
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-amber-500"
-                />
+                <label className="block text-xs font-medium text-zinc-300 mb-1">User *</label>
+                {selectedUser ? (
+                  <div className="flex items-center justify-between gap-3 rounded-xl bg-zinc-950 border border-amber-500/40 px-3.5 py-2.5">
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white truncate">{selectedUser.displayName || selectedUser.username || selectedUser.email}</div>
+                      <div className="text-[11px] text-zinc-400 truncate">{selectedUser.email}</div>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-xs font-mono font-bold text-emerald-400">${userBalance.toFixed(2)}</span>
+                      <button type="button" onClick={() => setSelectedUserId('')} className="text-[11px] text-amber-400 hover:underline cursor-pointer">Change</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-zinc-950 border border-zinc-800 overflow-hidden">
+                    <div className="relative border-b border-zinc-800">
+                      <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-zinc-500" />
+                      <input
+                        type="text"
+                        autoFocus
+                        value={userSearch}
+                        onChange={(e) => setUserSearch(e.target.value)}
+                        placeholder="Search by email, username or name..."
+                        className="w-full bg-transparent pl-8 pr-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none"
+                      />
+                    </div>
+                    <div className="max-h-48 overflow-y-auto divide-y divide-zinc-900">
+                      {allUsers.length === 0 && <div className="p-3 text-xs text-zinc-500">Loading users...</div>}
+                      {allUsers.length > 0 && filteredUsers.length === 0 && <div className="p-3 text-xs text-zinc-500">No user matches "{userSearch}".</div>}
+                      {filteredUsers.map((u) => (
+                        <button
+                          type="button"
+                          key={u.id}
+                          onClick={() => { setSelectedUserId(u.id); setCreateEmail(u.email); }}
+                          className="w-full flex items-center justify-between gap-3 px-3.5 py-2 text-left hover:bg-zinc-900 transition-colors cursor-pointer"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-xs text-white font-semibold truncate">
+                              {u.displayName || u.username || u.email}
+                              {(u.role === 'admin' || u.role === 'super_admin') && <span className="ml-1.5 text-[9px] uppercase text-amber-400">{u.role}</span>}
+                              {u.isSuspended && <span className="ml-1.5 text-[9px] uppercase text-rose-400">suspended</span>}
+                            </div>
+                            <div className="text-[11px] text-zinc-500 truncate">{u.email}</div>
+                          </div>
+                          <span className="text-[11px] font-mono font-bold text-emerald-400 shrink-0">${Number(u.credits || 0).toFixed(2)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -691,6 +775,7 @@ export const AdminServers: React.FC = () => {
                     onChange={(e) => {
                       const val = e.target.value as 'minecraft' | 'bot';
                       setCreateCategory(val);
+                      setSelectedPlanId('');
                       if (val === 'minecraft') {
                         setCreateSoftware('Paper');
                         loadAdminMinecraftVersions('Paper');
@@ -777,6 +862,65 @@ export const AdminServers: React.FC = () => {
                 </select>
               </div>
 
+              <div className="flex gap-2">
+                {(['plan', 'custom'] as const).map((m) => (
+                  <button
+                    type="button"
+                    key={m}
+                    onClick={() => setCreateMode(m)}
+                    className={`flex-1 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${createMode === m ? 'bg-amber-500/10 border-amber-500/40 text-amber-400' : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-white'}`}
+                  >
+                    {m === 'plan' ? 'Plan (charged from user credits)' : 'Custom specs (no charge)'}
+                  </button>
+                ))}
+              </div>
+
+              {createMode === 'plan' ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-medium text-zinc-300">Plan *</label>
+                    <select
+                      value={createCycle}
+                      onChange={(e) => setCreateCycle(e.target.value as 'monthly' | 'yearly')}
+                      className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none focus:border-amber-500"
+                    >
+                      <option value="monthly">Monthly price</option>
+                      <option value="yearly">Yearly price</option>
+                    </select>
+                  </div>
+                  {categoryPlans.length === 0 ? (
+                    <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-500">
+                      No active {createCategory === 'bot' ? 'bot hosting' : 'Minecraft'} plans. Create one in Admin -&gt; Products, or use custom specs.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto">
+                      {categoryPlans.map((p) => {
+                        const price = Number(createCycle === 'yearly' ? p.priceYearly : p.priceMonthly) || 0;
+                        return (
+                          <button
+                            type="button"
+                            key={p.id}
+                            onClick={() => setSelectedPlanId(p.id)}
+                            className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${selectedPlanId === p.id ? 'bg-amber-500/10 border-amber-500/50' : 'bg-zinc-950 border-zinc-800 hover:border-zinc-600'}`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-bold text-white truncate">{p.name}</span>
+                              <span className="text-xs font-mono font-bold text-amber-400">${price.toFixed(2)}</span>
+                            </div>
+                            <div className="text-[11px] text-zinc-400 mt-1">{p.ramMB >= 1024 ? `${(p.ramMB / 1024).toFixed(p.ramMB % 1024 ? 1 : 0)} GB` : `${p.ramMB} MB`} RAM · {p.cpuCores} CPU · {p.diskGB} GB disk</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {selectedPlan && selectedUser && (
+                    <div className={`p-3 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-2 ${notEnough ? 'bg-rose-500/10 border-rose-500/30 text-rose-300' : 'bg-emerald-500/5 border-emerald-500/20 text-zinc-300'}`}>
+                      <span>Balance <b className="font-mono">${userBalance.toFixed(2)}</b> - plan <b className="font-mono">${planPrice.toFixed(2)}</b></span>
+                      <span>{notEnough ? 'Not enough credits - add credits first' : <>After: <b className="font-mono text-emerald-400">${(userBalance - planPrice).toFixed(2)}</b></>}</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-zinc-300 mb-1">RAM (MB)</label>
@@ -811,6 +955,7 @@ export const AdminServers: React.FC = () => {
                   />
                 </div>
               </div>
+              )}
 
               <div className="flex items-center justify-end gap-3 pt-3">
                 <button
@@ -823,7 +968,7 @@ export const AdminServers: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isCreating}
+                  disabled={isCreating || !selectedUser || (createMode === 'plan' && (!selectedPlan || notEnough))}
                   className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-500/20 transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {isCreating ? <Loader2 className="h-4 w-4 animate-spin text-zinc-950" /> : <ServerIcon className="h-4 w-4 text-zinc-950" />}

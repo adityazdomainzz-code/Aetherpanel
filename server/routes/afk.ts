@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getDb, saveDb } from '../db';
 import { authenticateUser, requireAdmin, AuthenticatedRequest } from '../auth';
 import { AfkSession, RewardTransaction, AfkSettings } from '../../src/types';
+import { blockSelfFunding, ALLOW_SELF_FUNDING } from '../services/fundingPolicy';
 
 const router = Router();
 
@@ -30,14 +31,14 @@ router.get('/status', authenticateUser, async (req: AuthenticatedRequest, res) =
       success: true,
       userCredits: user.credits || 0,
       todayEarnedCredits,
-      settings: db.afkSettings || {
+      settings: ALLOW_SELF_FUNDING ? (db.afkSettings || {
         enabled: true,
         creditsPerInterval: 5,
         intervalMinutes: 10,
         dailyMaxCredits: 100,
         weeklyMaxCredits: 500,
         minAccountAgeDays: 0
-      },
+      }) : { ...(db.afkSettings || {}), enabled: false }, // AFK credits are off: only admins add credits
       activeSession: activeSession || null
     });
   } catch (err: any) {
@@ -46,7 +47,7 @@ router.get('/status', authenticateUser, async (req: AuthenticatedRequest, res) =
 });
 
 // POST /api/v1/afk/start - Start new AFK session
-router.post('/start', authenticateUser, async (req: AuthenticatedRequest, res) => {
+router.post('/start', blockSelfFunding, authenticateUser, async (req: AuthenticatedRequest, res) => {
   try {
     const user = req.user!;
     const db = await getDb();
@@ -89,7 +90,7 @@ router.post('/start', authenticateUser, async (req: AuthenticatedRequest, res) =
 });
 
 // POST /api/v1/afk/heartbeat - Heartbeat check & reward crediting
-router.post('/heartbeat', authenticateUser, async (req: AuthenticatedRequest, res) => {
+router.post('/heartbeat', blockSelfFunding, authenticateUser, async (req: AuthenticatedRequest, res) => {
   try {
     const user = req.user!;
     const { sessionId } = req.body;

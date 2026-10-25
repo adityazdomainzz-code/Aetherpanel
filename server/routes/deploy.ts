@@ -10,6 +10,7 @@ import { RESERVED_SYSTEM_PORTS, isPortReserved, resolveNodePublicEndpoint, resol
 import { getUserAllocationStatus, canUserDeployServer } from '../services/allocationService';
 import { resolveServerResources } from '../services/resourceResolverService';
 import { applyServerPortRule } from '../services/networkProtectionService';
+import { ALLOW_SELF_DEPLOY, isAdminRole, SELF_DEPLOY_ERROR } from '../services/fundingPolicy';
 
 const router = Router();
 
@@ -51,7 +52,7 @@ async function withGlobalDeployLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function withUserDeployLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+export async function withUserDeployLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   while (userDeployLocks.has(userId)) {
     await userDeployLocks.get(userId);
   }
@@ -84,11 +85,14 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   serverTypeId?: string;
   transactionRef?: string;
   isPaidUpfront?: boolean;
+  // set when an administrator creates the server for this user: skips the user's own
+  // server-count limit, but the plan price is still taken from the user's credits
+  adminProvision?: { adminId: string; adminEmail: string };
 }) {
   const {
     name, planId, templateId, nodeId, location, software, version,
     billingCycle, couponCode, paymentMethod, environmentVars, serverTypeId,
-    transactionRef, isPaidUpfront
+    transactionRef, isPaidUpfront, adminProvision
   } = payload;
 
   if (!name || !planId) {
@@ -111,7 +115,7 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
 
   const template = templateId ? (db.templates || []).find((t: any) => t.id === templateId) : null;
 
-  const deployCheck = canUserDeployServer(db, freshUser);
+  const deployCheck = adminProvision ? { allowed: true, errorMessage: '' } : canUserDeployServer(db, freshUser);
   if (!deployCheck.allowed) {
     throw new Error(deployCheck.errorMessage || 'Server allocation limit reached.');
   }
@@ -198,11 +202,15 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   const methodStr = (paymentMethod || 'balance').toLowerCase();
 
   // Deduct balance only if amount > 0 and not paid upfront
+  let deductedCredits = 0;
   if (finalAmount > 0 && !isPaidUpfront && !methodStr.includes('stripe') && !methodStr.includes('upi') && !methodStr.includes('crypto')) {
     if (freshUser.credits < finalAmount) {
-      throw new Error(`Insufficient credits balance. Required: $${finalAmount.toFixed(2)}, Available: $${freshUser.credits.toFixed(2)}`);
+      throw new Error(adminProvision
+        ? `${freshUser.email} has only $${(freshUser.credits || 0).toFixed(2)} credits - the plan '${plan.name}' costs $${finalAmount.toFixed(2)}. Add credits to the user first (Admin -> Users).`
+        : `Insufficient credits balance. Required: $${finalAmount.toFixed(2)}, Available: $${freshUser.credits.toFixed(2)}`);
     }
     freshUser.credits = parseFloat((freshUser.credits - finalAmount).toFixed(2));
+    deductedCredits = finalAmount;
   }
 
   let alloc = db.allocations.find((a: any) => a.nodeId === targetNode.id && !a.isAssigned && !isPortReserved(a.port, targetNode));
@@ -317,9 +325,9 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
       cpuPercent: resolvedResources.cpuPercent,
       diskGb: resolvedResources.diskGB
     },
-    provisionSource: 'self_service',
-    isAdminCreated: false,
-    createdByAdmin: false,
+    provisionSource: adminProvision ? 'admin_assigned' : 'self_service',
+    isAdminCreated: !!adminProvision,
+    createdByAdmin: !!adminProvision,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     cpuUsage: 12.0,
@@ -339,7 +347,7 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     applyServerPortRule(assignedPort, 'both', newServer.id, newServer.name).catch(() => {});
   }
 
-  let orderPaymentMethodName = paymentMethod || 'Aether Account Credits';
+  let orderPaymentMethodName = (paymentMethod && paymentMethod !== 'balance') ? paymentMethod : (adminProvision ? 'Account Credits (created by admin)' : 'Aether Account Credits');
   if (isPaidUpfront && methodStr.includes('crypto')) orderPaymentMethodName = `Crypto Processor (${transactionRef ? 'Tx: ' + transactionRef.slice(0, 10) : 'Confirmed'})`;
 
   const order: Order = {
@@ -388,6 +396,11 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
       if (srvIdx !== -1) db.servers.splice(srvIdx, 1);
       if (alloc) alloc.isAssigned = false;
     }
+    // the server was not created: give the credits back and drop the order
+    if (deductedCredits > 0) freshUser.credits = parseFloat((freshUser.credits + deductedCredits).toFixed(2));
+    const ordIdx = db.orders.findIndex((o: any) => o.id === order.id);
+    if (ordIdx !== -1) db.orders.splice(ordIdx, 1);
+    saveDbSync();
     throw err;
   }
 
@@ -396,7 +409,9 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   await createAuditLog(
     freshUser.id, freshUser.email, freshUser.role,
     'SERVER_PROVISION', serverId,
-    `Provisioned server '${name}' from template '${selectedSoftware}' ($${finalAmount.toFixed(2)})`
+    adminProvision
+      ? `Admin ${adminProvision.adminEmail} created server '${name}' (${plan.name}) for this user - $${finalAmount.toFixed(2)} taken from credits`
+      : `Provisioned server '${name}' from template '${selectedSoftware}' ($${finalAmount.toFixed(2)})`
   );
 
   dispatchWebhookEvent('server.created', {
@@ -418,10 +433,16 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
 
 // POST /api/v1/deploy/create - Deploy server instance
 router.post('/create', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  // only administrators create servers (Admin -> Servers -> Create Server)
+  if (!ALLOW_SELF_DEPLOY && !isAdminRole(req.user!.role)) {
+    return res.status(403).json(SELF_DEPLOY_ERROR);
+  }
   return withUserDeployLock(req.user!.id, async () => {
     try {
       const db = await getDb();
-      const result = await executeServerDeployment(db, req.user!.id, req.body);
+      // never trust payment flags from the browser: the price is always taken from credits
+      const { isPaidUpfront, adminProvision, paymentMethod, transactionRef, ...body } = req.body || {};
+      const result = await executeServerDeployment(db, req.user!.id, { ...body, paymentMethod: 'balance' });
       res.json({
         success: true,
         message: 'Server deployed and running!',

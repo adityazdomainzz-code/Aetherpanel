@@ -28,6 +28,8 @@ import {
   removeServerPortRule
 } from '../services/networkProtectionService';
 import { getUiDiagnosticStats, getUiErrors } from '../services/uiDiagnosticService';
+import { executeServerDeployment, withUserDeployLock } from './deploy';
+import { ADMIN_ROLES } from '../services/fundingPolicy';
 import { detectDockerCapabilities, runWingsParityDiagnosticTest } from '../services/containerEngine';
 
 const router = Router();
@@ -143,6 +145,9 @@ router.post('/users', async (req: AuthenticatedRequest, res: Response) => {
     updatedAt: new Date().toISOString()
   };
   (newUser as any).passwordHash = passwordHash;
+  // login reads db.passwords[userId] - store it there too, otherwise admin-created accounts cannot log in
+  db.passwords = db.passwords || {};
+  db.passwords[newUser.id] = passwordHash;
 
   db.users.push(newUser);
   saveDbSync();
@@ -235,6 +240,11 @@ router.put('/users/:id', async (req: AuthenticatedRequest, res: Response) => {
 
   const { role, isSuspended, credits, displayName, serverLimit, baseServerAllocations, adminGrantedAllocations } = req.body;
 
+  // credits and roles: administrators only (support / moderator staff cannot give money or promote anybody)
+  if ((credits !== undefined || role !== undefined) && !ADMIN_ROLES.includes(req.user!.role)) {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Only administrators can change credits or roles.' } });
+  }
+
   if (role && ['user', 'support', 'moderator', 'admin', 'super_admin'].includes(role)) {
     user.role = role;
   }
@@ -309,7 +319,7 @@ router.patch('/users/:id/allocation', async (req: AuthenticatedRequest, res: Res
 });
 
 // PATCH /api/v1/admin/users/:id/role
-router.patch('/users/:id/role', async (req: AuthenticatedRequest, res: Response) => {
+router.patch('/users/:id/role', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
   const db = await getDb();
   const user = db.users.find(u => u.id === req.params.id);
   if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
@@ -347,7 +357,7 @@ router.patch('/users/:id/suspend', async (req: AuthenticatedRequest, res: Respon
 });
 
 // POST /api/v1/admin/users/:id/credits - Add, remove, or set user balance
-router.post('/users/:id/credits', async (req: AuthenticatedRequest, res: Response) => {
+router.post('/users/:id/credits', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
   const db = await getDb();
   const user = db.users.find(u => u.id === req.params.id);
   if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
@@ -1160,9 +1170,11 @@ router.post('/nodes/:id/allocations/bulk-delete', async (req: AuthenticatedReque
 
 // --- ALL SERVERS ---
 // POST /api/v1/admin/servers/create - Admin provision custom server for user with custom specs
-router.post('/servers/create', async (req: AuthenticatedRequest, res: Response) => {
+// Only admins create servers. With a planId the plan price is taken from the user's credits;
+// without a planId the admin sets custom specs (no charge).
+router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
   const db = await getDb();
-  const { userEmail, userId, name, hostingCategory, software, version, ramMB, cpuCores, diskGB, nodeId } = req.body;
+  const { userEmail, userId, name, hostingCategory, software, version, ramMB, cpuCores, diskGB, nodeId, planId, billingCycle } = req.body;
 
   const targetUser = db.users.find(u => 
     (userId && u.id === userId) || 
@@ -1173,6 +1185,40 @@ router.post('/servers/create', async (req: AuthenticatedRequest, res: Response) 
     return res.status(404).json({
       success: false,
       error: { code: 'USER_NOT_FOUND', message: 'No user account was found with this email address.' }
+    });
+  }
+
+  if (planId) {
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Server name is required.' } });
+    }
+    return withUserDeployLock(targetUser.id, async () => {
+      try {
+        const balanceBefore = targetUser.credits || 0;
+        const result = await executeServerDeployment(db, targetUser.id, {
+          name: String(name).trim(),
+          planId,
+          nodeId: nodeId || undefined,
+          software: software || undefined,
+          version: version || undefined,
+          billingCycle: billingCycle === 'yearly' ? 'yearly' : 'monthly',
+          paymentMethod: 'balance',
+          adminProvision: { adminId: req.user!.id, adminEmail: req.user!.email }
+        });
+        const charged = parseFloat((balanceBefore - (targetUser.credits || 0)).toFixed(2));
+        await createAuditLog(
+          req.user!.id, req.user!.email, req.user!.role,
+          'ADMIN_PROVISION_SERVER', result.server.id,
+          `Admin created server '${result.server.name}' (plan ${planId}) for ${targetUser.email} - charged $${charged.toFixed(2)}, balance now $${(targetUser.credits || 0).toFixed(2)}`
+        );
+        return res.json({
+          success: true,
+          message: `Server created for ${targetUser.email}. $${charged.toFixed(2)} taken from their credits (balance now $${(targetUser.credits || 0).toFixed(2)}).`,
+          data: { ...result.server, charged, newBalance: targetUser.credits }
+        });
+      } catch (err: any) {
+        return res.status(400).json({ success: false, error: { code: 'DEPLOYMENT_FAILED', message: err.message || 'Server creation failed.' } });
+      }
     });
   }
 
@@ -1846,7 +1892,7 @@ router.get('/orders', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST /api/v1/admin/orders/:id/approve
-router.post('/orders/:id/approve', async (req: AuthenticatedRequest, res: Response) => {
+router.post('/orders/:id/approve', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
   const db = await getDb();
   const order = db.orders.find(o => o.id === req.params.id);
 

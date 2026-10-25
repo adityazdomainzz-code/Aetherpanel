@@ -8,6 +8,8 @@ import {
 import { apiRequest } from '../../lib/api';
 import { Order, PaymentGatewaySettings, CryptoInvoice } from '../../types';
 import { useAuth } from '../../lib/AuthContext';
+import { usePolicy, loadPolicy, canDeploy } from '../../lib/policy';
+import { SelfServiceLocked } from '../../components/SelfServiceLocked';
 import { useTheme } from '../../lib/ThemeContext';
 import { CryptoPaymentModal } from '../../components/billing/CryptoPaymentModal';
 import { RealtimeTransactionTracker } from '../../components/billing/RealtimeTransactionTracker';
@@ -90,6 +92,9 @@ interface InvoiceDetail {
 
 export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
   const { user, refreshUser } = useAuth();
+  const policy = usePolicy();
+  const canFund = policy.selfFunding; // false: only admins add credits
+  const deployOk = canDeploy(user, policy);
   const { accentClasses } = useTheme();
 
   // Navigation tabs
@@ -180,7 +185,8 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
         console.error(e);
       }
     };
-    initLiveInvoice();
+    // the demo crypto invoice adds credits - only when users may fund themselves
+    loadPolicy().then((p) => { if (p.selfFunding) initLiveInvoice(); });
   }, []);
 
   // Polling for active crypto invoice transaction pipeline
@@ -418,17 +424,17 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
 
         <div className="relative z-10 flex items-center gap-3">
           <button
-            onClick={() => onNavigate('deploy')}
+            onClick={() => onNavigate(deployOk ? 'deploy' : 'support')}
             className="px-4 py-2.5 rounded-xl text-xs font-bold text-zinc-300 bg-zinc-900 border border-zinc-800 hover:text-white hover:bg-zinc-850 hover:border-zinc-700 transition"
           >
-            <Server className="h-4 w-4 inline mr-2 text-amber-400" /> Deploy Premium Instance
+            <Server className="h-4 w-4 inline mr-2 text-amber-400" /> {deployOk ? 'Deploy Premium Instance' : 'Request a Server'}
           </button>
           
           <button
-            onClick={() => setShowAddCreditsModal(true)}
+            onClick={() => (canFund ? setShowAddCreditsModal(true) : onNavigate('support'))}
             className="px-5 py-2.5 rounded-xl font-extrabold text-xs text-zinc-950 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 hover:from-amber-400 hover:to-yellow-300 shadow-lg shadow-amber-500/10 flex items-center gap-2 transition-all duration-300 scale-100 hover:scale-[1.02]"
           >
-            <PlusCircle className="h-4 w-4 text-zinc-950" /> Add Wallet Funds
+            <PlusCircle className="h-4 w-4 text-zinc-950" /> {canFund ? 'Add Wallet Funds' : 'Ask Admin for Credits'}
           </button>
         </div>
       </div>
@@ -454,10 +460,10 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
           <div className="flex items-center justify-between pt-2.5 border-t border-zinc-800 text-[11px] text-zinc-450 font-medium">
             <span>VIP Auto-Renew Ready</span>
             <button
-              onClick={() => setShowAddCreditsModal(true)}
+              onClick={() => (canFund ? setShowAddCreditsModal(true) : onNavigate('support'))}
               className="text-amber-400 hover:text-amber-300 font-extrabold flex items-center gap-0.5 transition"
             >
-              Add Funds <ChevronRight className="h-3 w-3" />
+              {canFund ? 'Add Funds' : 'Ask admin for credits'} <ChevronRight className="h-3 w-3" />
             </button>
           </div>
         </div>
@@ -531,7 +537,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
           { id: 'orders', label: `Invoices & Ledger (${orders.length})`, icon: FileText },
           { id: 'calculator', label: 'Resource Calculator', icon: Cpu },
           { id: 'vouchers', label: 'Promo & Vouchers', icon: Tag }
-        ].map((tab) => {
+        ].filter((tab) => canFund || tab.id !== 'vouchers').map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
           return (
@@ -562,7 +568,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
       {activeTab === 'overview' && (
         <div className="space-y-6 animate-in fade-in">
           {/* Real-Time Transaction Status Pipeline Component */}
-          {gateways?.crypto?.enabled !== false && (
+          {canFund && gateways?.crypto?.enabled !== false && (
             <RealtimeTransactionTracker
               invoice={activeCryptoInvoice}
               onRefresh={fetchAllBillingData}
@@ -575,7 +581,8 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
             {/* Left 2 Cols: Quick Deposit & Gateways Summary */}
             <div className="lg:col-span-2 space-y-6">
               {/* Luxury LTC & Crypto Copy-to-Clipboard QR Code Generator */}
-              {gateways?.crypto?.enabled !== false && (
+              {!canFund && <SelfServiceLocked kind="funds" onNavigate={onNavigate} compact />}
+              {canFund && gateways?.crypto?.enabled !== false && (
                 <LuxuryLtcQrCard
                   amountUsd={creditAmount}
                   walletAddress={gateways?.crypto?.ltcAddress || 'ltc1q3w4e5r6t7y8u9i0o1p2a3s4d5f6g7h8j9k0l'}
@@ -583,6 +590,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
                 />
               )}
 
+              {canFund && (
               <div className="p-6 rounded-3xl bg-zinc-900/80 border border-zinc-800 space-y-5">
                 <div className="flex items-center justify-between">
                   <div>
@@ -643,6 +651,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
                   </div>
                 </div>
               </div>
+              )}
 
             {/* Recent Orders Preview */}
             <div className="p-6 rounded-3xl bg-zinc-900/80 border border-zinc-800 space-y-4">
@@ -706,6 +715,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
 
           {/* Right Col: Promo Code Voucher Redemption & Deployment Shortlink */}
           <div className="space-y-6">
+            {canFund && (<>
             {/* Promo Code Box */}
             <div className="p-6 rounded-3xl bg-zinc-900/80 border border-zinc-800 space-y-4">
               <div className="flex items-center justify-between">
@@ -743,7 +753,9 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
                 </div>
               )}
             </div>
+            </>)}
 
+            {deployOk && (<>
             {/* Quick Deploy Server Card */}
             <div className="p-6 rounded-3xl bg-gradient-to-br from-amber-500/10 to-amber-600/5 border border-amber-500/20 space-y-3">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -753,12 +765,13 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
                 Deploy high-performance Paper, Purpur, Fabric, Node.js, or Bun servers with instant port binding.
               </p>
               <button
-                onClick={() => onNavigate('deploy')}
+                onClick={() => onNavigate(deployOk ? 'deploy' : 'support')}
                 className="w-full py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-bold text-xs shadow-lg shadow-amber-500/10 transition"
               >
                 Open Server Provisioner →
               </button>
             </div>
+            </>)}
           </div>
         </div>
       </div>
@@ -772,10 +785,10 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
               <Server className="h-4 w-4 text-amber-400" /> Active Server Subscriptions ({subscriptions.length})
             </h2>
             <button
-              onClick={() => onNavigate('deploy')}
+              onClick={() => onNavigate(deployOk ? 'deploy' : 'support')}
               className="px-3.5 py-1.5 rounded-xl bg-amber-400 text-black font-bold text-xs hover:bg-amber-300 transition"
             >
-              + Add Server
+              {deployOk ? '+ Add Server' : 'Request a Server'}
             </button>
           </div>
 
@@ -787,10 +800,10 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
                 You haven't provisioned any Minecraft or Bot hosting servers yet.
               </p>
               <button
-                onClick={() => onNavigate('deploy')}
+                onClick={() => onNavigate(deployOk ? 'deploy' : 'support')}
                 className="px-5 py-2.5 rounded-xl bg-amber-400 text-black font-bold text-xs"
               >
-                Deploy Your First Server
+                {deployOk ? 'Deploy Your First Server' : 'Request a Server'}
               </button>
             </div>
           ) : (
@@ -1104,10 +1117,10 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
             </div>
 
             <button
-              onClick={() => onNavigate('deploy')}
+              onClick={() => onNavigate(deployOk ? 'deploy' : 'support')}
               className="w-full py-3 rounded-2xl bg-amber-400 hover:bg-amber-300 text-black font-bold text-xs shadow-lg shadow-amber-500/10 transition flex items-center justify-center gap-2"
             >
-              <span>Deploy Server with these Specs</span>
+              <span>{deployOk ? 'Deploy Server with these Specs' : 'Request a Server with these Specs'}</span>
               <ArrowUpRight className="h-4 w-4" />
             </button>
           </div>
@@ -1115,7 +1128,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
       )}
 
       {/* TAB 5: PROMO & VOUCHERS */}
-      {activeTab === 'vouchers' && (
+      {canFund && activeTab === 'vouchers' && (
         <div className="space-y-6 animate-in fade-in">
           <div className="p-6 rounded-3xl bg-zinc-900/80 border border-zinc-800 space-y-4">
             <h2 className="text-base font-bold text-white flex items-center gap-2">
@@ -1190,7 +1203,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
       )}
 
       {/* ADD CREDITS / DEPOSIT MODAL */}
-      {showAddCreditsModal && (
+      {canFund && showAddCreditsModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-xl bg-zinc-950 border border-zinc-800 p-6 rounded-3xl space-y-5 max-h-[90vh] overflow-y-auto shadow-2xl">
             <div className="flex justify-between items-center border-b border-zinc-800 pb-3">
@@ -1573,7 +1586,7 @@ export const Billing: React.FC<BillingProps> = ({ onNavigate }) => {
 
       {/* Real-time Crypto Payment Modal */}
       <CryptoPaymentModal
-        isOpen={showCryptoModal}
+        isOpen={canFund && showCryptoModal}
         onClose={() => setShowCryptoModal(false)}
         amountUsd={customAmountInput ? (parseFloat(customAmountInput) || 25) : creditAmount}
         purpose="deposit"

@@ -3,6 +3,7 @@ import { Server as ServerIcon, PlusCircle, Activity, Search } from 'lucide-react
 import { apiRequest } from '../../lib/api';
 import { Server } from '../../types';
 import { useAuth } from '../../lib/AuthContext';
+import { usePolicy, canDeploy } from '../../lib/policy';
 import { useTheme } from '../../lib/ThemeContext';
 import { ServerCard } from '../../components/server/ServerCard';
 import { normalizeServer } from '../../lib/serverNormalize';
@@ -13,6 +14,8 @@ interface ServersListProps {
 
 export const ServersList: React.FC<ServersListProps> = ({ onNavigate }) => {
   const { accentClasses } = useTheme();
+  const { user } = useAuth();
+  const policy = usePolicy();
   const [servers, setServers] = useState<Server[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -73,10 +76,10 @@ export const ServersList: React.FC<ServersListProps> = ({ onNavigate }) => {
         </div>
 
         <button
-          onClick={() => onNavigate('deploy')}
+          onClick={() => onNavigate(canDeploy(user, policy) ? 'deploy' : 'support')}
           className={`px-5 py-2.5 rounded-xl font-semibold text-xs text-white bg-gradient-to-r ${accentClasses.gradient} shadow-md flex items-center gap-2 hover:opacity-95 transition-all`}
         >
-          <PlusCircle className="h-4 w-4" /> Deploy New Server
+          <PlusCircle className="h-4 w-4" /> {canDeploy(user, policy) ? 'Deploy New Server' : 'Request a Server'}
         </button>
       </div>
 
@@ -124,10 +127,10 @@ export const ServersList: React.FC<ServersListProps> = ({ onNavigate }) => {
             </p>
           </div>
           <button
-            onClick={() => onNavigate('deploy')}
+            onClick={() => onNavigate(canDeploy(user, policy) ? 'deploy' : 'support')}
             className="px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs inline-flex items-center gap-2"
           >
-            <PlusCircle className="h-4 w-4" /> Deploy Server
+            <PlusCircle className="h-4 w-4" /> {canDeploy(user, policy) ? 'Deploy Server' : 'Request a Server'}
           </button>
         </div>
       ) : (

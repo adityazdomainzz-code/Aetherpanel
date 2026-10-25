@@ -3,6 +3,7 @@ import { getDb, saveDbSync } from '../db';
 import { authMiddleware, AuthenticatedRequest, createAuditLog } from '../auth';
 import { Order, CryptoInvoice } from '../../src/types';
 import { executeServerDeployment } from './deploy';
+import { blockSelfFunding, ALLOW_SELF_FUNDING, ALLOW_SELF_DEPLOY } from '../services/fundingPolicy';
 
 const router = Router();
 
@@ -279,7 +280,7 @@ router.post('/coupons/validate', authMiddleware, async (req: AuthenticatedReques
 });
 
 // POST /api/v1/billing/redeem-coupon - Redeem gift code or voucher directly to balance
-router.post('/redeem-coupon', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/redeem-coupon', blockSelfFunding, authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { code } = req.body;
   if (!code || typeof code !== 'string') {
     return res.status(400).json({ success: false, error: { code: 'CODE_REQUIRED', message: 'Please enter a voucher code.' } });
@@ -399,6 +400,11 @@ router.post('/redeem-coupon', authMiddleware, async (req: AuthenticatedRequest, 
   });
 });
 
+// GET /api/v1/billing/policy - what users may do themselves (the UI hides deposits / deploy when off)
+router.get('/policy', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  res.json({ success: true, data: { selfFunding: ALLOW_SELF_FUNDING, selfDeploy: ALLOW_SELF_DEPLOY } });
+});
+
 // GET /api/v1/billing/payment-methods - Detailed gateway settings
 router.get('/payment-methods', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const db = await getDb();
@@ -441,7 +447,7 @@ router.get('/payment-methods', authMiddleware, async (req: AuthenticatedRequest,
 });
 
 // POST /api/v1/billing/add-credits - Deposit credits into user wallet
-router.post('/add-credits', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/add-credits', blockSelfFunding, authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { amount, paymentMethod, transactionRef, proofUrl, cardDetails, cryptoCoin } = req.body;
   const numAmount = parseFloat(amount);
 
@@ -584,7 +590,7 @@ router.post('/estimate', authMiddleware, async (req: AuthenticatedRequest, res: 
 });
 
 // POST /api/v1/billing/verify-tx - Automated instant Crypto TxID & UPI UTR verification
-router.post('/verify-tx', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/verify-tx', blockSelfFunding, authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { txHash, paymentMethod, cryptoCoin, amount } = req.body;
   const numAmount = parseFloat(amount) || 10.00;
 
@@ -709,7 +715,7 @@ router.get('/crypto/available-coins', authMiddleware, async (req: AuthenticatedR
 });
 
 // POST /api/v1/billing/crypto/create-invoice - Create dynamic live crypto payment request
-router.post('/crypto/create-invoice', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/crypto/create-invoice', blockSelfFunding, authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { amount, cryptoCoin, purpose, serverPayload } = req.body;
   const parsedAmount = typeof amount === 'number' ? amount : parseFloat(amount);
   const numAmount = !isNaN(parsedAmount) && parsedAmount > 0 ? parsedAmount : 10.00;
@@ -818,7 +824,8 @@ router.get('/crypto/invoice/:invoiceId', authMiddleware, async (req: Authenticat
   }
 
   // Automated progressive blockchain transaction auto-detection & verification simulator
-  if (invoice.status !== 'paid' && invoice.status !== 'expired') {
+  // (simulated payments add credits - only allowed when self-funding is turned on)
+  if (ALLOW_SELF_FUNDING && invoice.status !== 'paid' && invoice.status !== 'expired') {
     const elapsedSeconds = Math.floor((Date.now() - new Date(invoice.createdAt).getTime()) / 1000);
     let changed = false;
 
@@ -895,7 +902,7 @@ router.get('/crypto/invoice/:invoiceId', authMiddleware, async (req: Authenticat
 });
 
 // POST /api/v1/billing/crypto/simulate-step - Real-time blockchain status progression & auto-activation
-router.post('/crypto/simulate-step', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/crypto/simulate-step', blockSelfFunding, authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { invoiceId, action, txHash } = req.body;
   const db = await getDb();
   if (!db.cryptoInvoices) db.cryptoInvoices = [];
@@ -990,7 +997,7 @@ router.post('/crypto/simulate-step', authMiddleware, async (req: AuthenticatedRe
 });
 
 // POST /api/v1/billing/crypto/submit-hash - Submit user transaction hash and auto-verify
-router.post('/crypto/submit-hash', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/crypto/submit-hash', blockSelfFunding, authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { invoiceId, txHash } = req.body;
   if (!txHash || typeof txHash !== 'string' || txHash.trim().length < 6) {
     return res.status(400).json({ success: false, error: { code: 'INVALID_HASH', message: 'Please enter a valid transaction hash or TxID.' } });

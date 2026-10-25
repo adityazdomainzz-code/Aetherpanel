@@ -8,6 +8,7 @@ import {
   Tag, ShieldAlert, Cpu, Scale, LayoutTemplate
 } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
+import { usePolicy, canDeploy } from '../lib/policy';
 import { useTheme } from '../lib/ThemeContext';
 import { AetherLogo } from './AetherLogo';
 
@@ -29,6 +30,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectServer
 }) => {
   const { user, logout } = useAuth();
+  const policy = usePolicy();
   const { accentClasses } = useTheme();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
@@ -528,6 +530,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                         >
                           <Server className="h-4 w-4" /> My Servers
                         </button>
+                        {canDeploy(user, policy) && (
                         <button
                           type="button"
                           onClick={() => handleNav('deploy')}
@@ -535,6 +538,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                         >
                           <Sparkles className="h-4 w-4" /> Deploy Server
                         </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleNav('billing')}
@@ -545,6 +549,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                           </div>
                           <span className="font-mono text-emerald-400 font-bold">${user?.credits?.toFixed(2) || '0.00'}</span>
                         </button>
+                        {policy.selfFunding && (
                         <button
                           type="button"
                           onClick={() => handleNav('afk-rewards')}
@@ -555,6 +560,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                           </div>
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono">EARN</span>
                         </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleNav('support')}

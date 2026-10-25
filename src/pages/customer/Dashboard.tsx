@@ -6,6 +6,7 @@ import {
 import { apiRequest } from '../../lib/api';
 import { Server, UserAllocationStatus } from '../../types';
 import { useAuth } from '../../lib/AuthContext';
+import { usePolicy, canDeploy } from '../../lib/policy';
 import { useTheme } from '../../lib/ThemeContext';
 import { ServerCard } from '../../components/server/ServerCard';
 import { normalizeServer, formatMemory } from '../../lib/serverNormalize';
@@ -17,6 +18,7 @@ interface DashboardProps {
 
 export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onSelectServer }) => {
   const { user } = useAuth();
+  const policy = usePolicy();
   const { accentClasses } = useTheme();
 
   const [servers, setServers] = useState<Server[]>([]);
@@ -94,11 +96,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onSelectServer
         </div>
 
         <button
-          onClick={() => onNavigate('deploy')}
+          onClick={() => onNavigate(canDeploy(user, policy) ? 'deploy' : 'support')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-xs text-white bg-gradient-to-r ${accentClasses.gradient} shadow-lg ${accentClasses.shadow} hover:opacity-95 transition-all`}
         >
           <PlusCircle className="h-4 w-4" />
-          <span>Create New Server</span>
+          <span>{canDeploy(user, policy) ? 'Create New Server' : 'Request a Server'}</span>
         </button>
       </div>
 
@@ -192,11 +194,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onSelectServer
                 </p>
               </div>
               <button
-                onClick={() => onNavigate('deploy')}
+                onClick={() => onNavigate(canDeploy(user, policy) ? 'deploy' : 'support')}
                 className={`px-6 py-3 rounded-xl font-semibold text-xs text-white bg-gradient-to-r ${accentClasses.gradient} shadow-md inline-flex items-center gap-2`}
               >
                 <PlusCircle className="h-4 w-4" />
-                <span>Deploy First Server</span>
+                <span>{canDeploy(user, policy) ? 'Deploy First Server' : 'Request a Server'}</span>
               </button>
             </div>
           ) : (

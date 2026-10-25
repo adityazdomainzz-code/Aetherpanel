@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
 import { useTheme } from '../lib/ThemeContext';
+import { usePolicy, canDeploy } from '../lib/policy';
 
 interface SidebarProps {
   currentPage: string;
@@ -22,6 +23,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectServer
 }) => {
   const { user, logout } = useAuth();
+  const policy = usePolicy();
   const { accentClasses, accent, setActiveThemeId } = useTheme();
 
   return (
@@ -89,6 +91,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </button>
 
+        {canDeploy(user, policy) && (
         <button
           onClick={() => onNavigate('deploy')}
           className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all duration-300 text-white bg-gradient-to-r ${accentClasses.gradient} hover:brightness-110 shadow-lg shadow-black/30 my-3.5 cursor-pointer`}
@@ -96,6 +99,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <PlusCircle className="h-4 w-4" />
           <span>Deploy Server</span>
         </button>
+        )}
 
         <div className="pt-3 pb-1 text-[9px] font-mono font-semibold uppercase tracking-widest text-zinc-500 px-3">
           Management
@@ -114,6 +118,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </span>
         </button>
 
+        {policy.selfFunding && (
         <button
           onClick={() => onNavigate('afk-rewards')}
           className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all duration-300 ${currentPage === 'afk-rewards' ? 'bg-white/[0.06] text-white shadow-inner border border-white/5' : 'text-zinc-400 hover:text-white hover:bg-white/[0.02]'}`}
@@ -126,6 +131,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             EARN
           </span>
         </button>
+        )}
 
         <button
           onClick={() => onNavigate('support')}

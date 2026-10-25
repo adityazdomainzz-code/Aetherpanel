@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { useAuth } from '../lib/AuthContext';
+import { loadPolicy, canDeploy } from '../lib/policy';
 
 interface GlobalSearchModalProps {
   isOpen: boolean;
@@ -50,14 +51,14 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({ isOpen, on
         icon: Server,
         action: () => onNavigate('dashboard')
       },
-      {
+      ...(canDeploy(user, await loadPolicy()) ? [{
         id: 'nav_deploy',
         title: 'Deploy New Server',
         subtitle: 'Instant Minecraft & Discord Bot cloud provisioning',
         category: 'navigation',
         icon: Sparkles,
         action: () => onNavigate('deploy')
-      },
+      } as SearchItem] : []),
       {
         id: 'nav_servers',
         title: 'All Active Servers',
