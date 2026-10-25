@@ -11,6 +11,7 @@ import { fetchAuthoritativeMinecraftVersions, getCachedMinecraftVersions } from 
 import { formatMemory } from '../../lib/serverNormalize';
 import { Product, Plan, Node, UserAllocationStatus } from '../../types';
 import { useAuth } from '../../lib/AuthContext';
+import { usePolicy } from '../../lib/policy';
 import { useTheme } from '../../lib/ThemeContext';
 import { CryptoPaymentModal } from '../../components/billing/CryptoPaymentModal';
 
@@ -124,6 +125,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
   initialCategory
 }) => {
   const { user, refreshUser } = useAuth();
+  const policy = usePolicy(); // selfFunding false: only account credits, no card / UPI / crypto
   const { accentClasses } = useTheme();
 
   // Wizard Steps: 1 = Product & Software, 2 = Plan Tier & Resources, 3 = Name, Region & Billing, 4 = Review & Deploy
@@ -1005,7 +1007,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
                       <span>Credits (${user?.credits?.toFixed(2) || '0.00'})</span>
                     </button>
 
-                    {gateways?.stripe?.enabled !== false && (
+                    {policy.selfFunding && gateways?.stripe?.enabled !== false && (
                       <button
                         type="button"
                         onClick={() => setPaymentMethod('stripe')}
@@ -1020,7 +1022,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
                       </button>
                     )}
 
-                    {gateways?.upi?.enabled !== false && (
+                    {policy.selfFunding && gateways?.upi?.enabled !== false && (
                       <button
                         type="button"
                         onClick={() => setPaymentMethod('upi')}
@@ -1035,7 +1037,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
                       </button>
                     )}
 
-                    {gateways?.crypto?.enabled !== false && (
+                    {policy.selfFunding && gateways?.crypto?.enabled !== false && (
                       <button
                         type="button"
                         onClick={() => setPaymentMethod('crypto')}
@@ -1071,6 +1073,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
                             </span>
                             <span className="font-mono text-[11px]">Balance: ${user?.credits?.toFixed(2) || '0.00'}</span>
                           </div>
+                          {policy.selfFunding ? (
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
@@ -1088,6 +1091,9 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
                               Custom Deposit
                             </button>
                           </div>
+                          ) : (
+                            <div className="text-[11px] text-zinc-400">Add credits to this account in Admin -&gt; Users first.</div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1160,7 +1166,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
       )}
 
       {/* QUICK DEPOSIT MODAL WITHIN WIZARD */}
-      {showQuickDeposit && (
+      {policy.selfFunding && showQuickDeposit && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-zinc-950 border border-zinc-800 p-6 rounded-3xl space-y-4 shadow-2xl">
             <div className="flex justify-between items-center border-b border-zinc-800 pb-3">
@@ -1394,7 +1400,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
 
       {/* Real-time Crypto Payment Processor Modal */}
       <CryptoPaymentModal
-        isOpen={showCryptoModal}
+        isOpen={policy.selfFunding && showCryptoModal}
         onClose={() => setShowCryptoModal(false)}
         amountUsd={calculateTotalPrice()}
         purpose="server_deploy"
