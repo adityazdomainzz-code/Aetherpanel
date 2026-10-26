@@ -160,42 +160,25 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   }
 
   if (!targetNode) {
-    const candidateNodes = db.nodes.filter((n: any) => {
-      if (n.status !== 'online' || n.isMaintenanceMode) return false;      if (n.allowedProducts && n.allowedProducts.length > 0 && !n.allowedProducts.includes(plan.productId)) return false;
-      if (n.maxServers && n.maxServers > 0 && n.serverCount >= n.maxServers) return false;
-
-      const ramOverallocPct = n.ramOverallocatePercent || 0;
-      const effectiveMaxRam = n.totalRamMB * (1 + ramOverallocPct / 100);
-      const availableRam = effectiveMaxRam - n.usedRamMB - (n.reservedRamMB || 0);
-
-      const cpuOverallocPct = n.cpuOverallocatePercent || 0;
-      const effectiveMaxCpu = n.totalCpuCores * (1 + cpuOverallocPct / 100);
-      const availableCpu = effectiveMaxCpu - n.usedCpuCores - (n.reservedCpuCores || 0);
-
-      const availableDisk = n.totalDiskGB - n.usedDiskGB - (n.reservedDiskGB || 0);
-
-      const hasRam = availableRam >= resolvedResources.ramMB;
-      const hasCpu = availableCpu >= resolvedResources.cpuCores;
-      const hasDisk = availableDisk >= resolvedResources.diskGB;
-
-      if (!hasRam) nodeRejectionReason = 'INSUFFICIENT_RAM';
-      else if (!hasCpu) nodeRejectionReason = 'INSUFFICIENT_CPU';
-      else if (!hasDisk) nodeRejectionReason = 'INSUFFICIENT_DISK';
-
-      return hasRam && hasCpu && hasDisk;
-    });
-
+    // No capacity limits: servers are never refused for "insufficient RAM / CPU / disk" or max server count.
+    // Pick any online node (allowed for this product first), least loaded first; fall back to the panel's own node.
+    const usable = (n: any) => n.status === 'online' && !n.isMaintenanceMode;
+    let candidateNodes = db.nodes.filter((n: any) => usable(n) && (!n.allowedProducts || n.allowedProducts.length === 0 || n.allowedProducts.includes(plan.productId)));
+    if (candidateNodes.length === 0) candidateNodes = db.nodes.filter(usable);
+    if (candidateNodes.length === 0) candidateNodes = db.nodes.filter((n: any) => n.id === 'node_local' || n.isLocalNode);
+    if (candidateNodes.length === 0) candidateNodes = db.nodes.slice(0, 1);
     if (candidateNodes.length === 0) {
-      throw new Error(`All compute nodes are currently at maximum capacity or undergoing maintenance (Reason: ${nodeRejectionReason || 'NO_ELIGIBLE_NODES'}).`);
+      throw new Error('No compute node exists yet - add one in Admin -> Compute Nodes.');
     }
+    void nodeRejectionReason;
 
     let locationNodes = candidateNodes.filter((n: any) => n.location === location);
     if (locationNodes.length === 0) locationNodes = candidateNodes;
 
     locationNodes.sort((a: any, b: any) => {
-      const effMaxA = a.totalRamMB * (1 + (a.ramOverallocatePercent || 0) / 100);
-      const effMaxB = b.totalRamMB * (1 + (b.ramOverallocatePercent || 0) / 100);
-      return (a.usedRamMB / effMaxA) - (b.usedRamMB / effMaxB);
+      const effMaxA = Math.max(1, (a.totalRamMB || 1) * (1 + (a.ramOverallocatePercent || 0) / 100));
+      const effMaxB = Math.max(1, (b.totalRamMB || 1) * (1 + (b.ramOverallocatePercent || 0) / 100));
+      return ((a.usedRamMB || 0) / effMaxA) - ((b.usedRamMB || 0) / effMaxB);
     });
 
     targetNode = locationNodes[0];

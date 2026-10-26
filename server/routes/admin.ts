@@ -1246,9 +1246,14 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
       return res.status(400).json({ success: false, error: { code: 'VPS_ENGINE_MISSING', message: 'LXC/Incus is not installed on the panel machine. Install incus and run: incus admin init --minimal' } });
     }
   }
+  // No capacity limits here: any node is fine; fall back to the panel's own node so creation never fails for "no capacity"
+  const localNode = db.nodes.find(n => n.id === 'node_local' || n.isLocalNode);
   const targetNode = isVps
-    ? db.nodes.find(n => n.id === 'node_local' || n.isLocalNode)
-    : nodeId ? db.nodes.find(n => n.id === nodeId && n.status === 'online') : db.nodes.find(n => n.status === 'online' && !n.isMaintenanceMode);
+    ? localNode
+    : (nodeId ? db.nodes.find(n => n.id === nodeId) : null)
+      || db.nodes.find(n => n.status === 'online' && !n.isMaintenanceMode)
+      || localNode
+      || db.nodes[0];
 
   if (!targetNode) {
     return res.status(507).json({
