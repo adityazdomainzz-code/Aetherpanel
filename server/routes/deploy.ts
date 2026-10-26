@@ -1,3 +1,4 @@
+import { VPS_OS, buildVpsInfo, detectVpsEngines } from '../services/vpsService';
 import { Router, Response } from 'express';
 import { getDb, saveDbSync } from '../db';
 import { authMiddleware, AuthenticatedRequest, createAuditLog } from '../auth';
@@ -88,6 +89,9 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   // set when an administrator creates the server for this user: skips the user's own
   // server-count limit, but the plan price is still taken from the user's credits
   adminProvision?: { adminId: string; adminEmail: string };
+  // VPS plans: engine + OS (wizard sends OS as software and engine as version)
+  vpsEngine?: 'docker' | 'lxc';
+  vpsOs?: string;
 }) {
   const {
     name, planId, templateId, nodeId, location, software, version,
@@ -123,6 +127,19 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   const prod = db.products.find((p: any) => p.id === plan.productId);
   const category = template?.category || prod?.category || (plan.id.includes('bot') ? 'bot' : 'minecraft');
 
+  // ---- VPS plan: pick engine + OS and make sure the engine exists before any credits are taken
+  const isVps = category === 'vps' || plan.productId === 'prod_vps';
+  let vpsEngine: 'docker' | 'lxc' = 'docker';
+  let vpsOs = 'ubuntu-22.04';
+  if (isVps) {
+    vpsEngine = payload.vpsEngine || (/lxc|incus/i.test(String(version || '')) ? 'lxc' : 'docker');
+    const wanted = String(payload.vpsOs || software || '').toLowerCase();
+    vpsOs = Object.keys(VPS_OS).find((k) => k === wanted || VPS_OS[k].label.toLowerCase() === wanted) || 'ubuntu-22.04';
+    const eng = await detectVpsEngines(true);
+    if (vpsEngine === 'docker' && !eng.docker) throw new Error('VPS engine Docker is not installed or not running on the panel machine (curl -fsSL https://get.docker.com | sh).');
+    if (vpsEngine === 'lxc' && !eng.lxc) throw new Error('VPS engine LXC/Incus is not installed on the panel machine (install incus, then: incus admin init --minimal).');
+  }
+
   const resolvedResources = resolveServerResources({
     db,
     planId: plan.id,
@@ -134,7 +151,11 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   let targetNode = null;
   let nodeRejectionReason = '';
 
-  if (nodeId) {
+  if (isVps) {
+    // a VPS always runs on the panel machine itself
+    targetNode = db.nodes.find((n: any) => n.id === 'node_local' || n.isLocalNode) || null;
+    if (!targetNode) throw new Error('The panel machine (local node) was not found - VPS needs it.');
+  } else if (nodeId) {
     targetNode = db.nodes.find((n: any) => n.id === nodeId && n.status === 'online' && !n.isMaintenanceMode);
   }
 
@@ -253,10 +274,10 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     databases: resolvedResources.databases
   };
 
-  const selectedSoftware = software || template?.name || (category === 'minecraft' ? 'Paper' : 'Node.js');
-  const selectedVersion = version || template?.defaultVersion || (category === 'minecraft' ? '1.21.4' : 'Node 22 (LTS)');
+  const selectedSoftware = isVps ? `${VPS_OS[vpsOs].label} (${vpsEngine === 'docker' ? 'Docker' : 'LXC'})` : (software || template?.name || (category === 'minecraft' ? 'Paper' : 'Node.js'));
+  const selectedVersion = isVps ? vpsOs : (version || template?.defaultVersion || (category === 'minecraft' ? '1.21.4' : 'Node 22 (LTS)'));
 
-  let resolvedServerTypeId = serverTypeId;
+  let resolvedServerTypeId = isVps ? 'st_vps' : serverTypeId;
   if (!resolvedServerTypeId) {
     const swLower = (selectedSoftware || '').toLowerCase();
     if (swLower.includes('node')) resolvedServerTypeId = 'st_nodejs';
@@ -295,7 +316,10 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     limits: resourceLimits
   };
 
-  if (category === 'bot') {
+  if (isVps) {
+    for (const k of Object.keys(startupConfig)) delete startupConfig[k];
+    startupConfig.compiledCommand = '';
+  } else if (category === 'bot') {
     const cmdObj = buildBotStartupCommand(tempServerContext, startupConfig);
     startupConfig.compiledCommand = cmdObj.compiledCommand;
   } else {
@@ -312,7 +336,8 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     templateId: template?.id,
     serverTypeId: resolvedServerTypeId,
     deploymentState: 'READY',
-    status: 'running',
+    status: isVps ? 'installing' : 'running',
+    ...(isVps ? { vps: buildVpsInfo(serverId, vpsEngine, vpsOs, name) } : {}),
     primaryIp: effectiveIp,
     primaryPort: assignedPort,
     location: targetNode.locationName,
@@ -366,7 +391,7 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   };
   db.orders.unshift(order);
 
-  initializeServerFiles(serverId, prod?.category || 'minecraft', newServer.software, newServer.version);
+  if (!isVps) initializeServerFiles(serverId, prod?.category || 'minecraft', newServer.software, newServer.version);
 
   if (prod?.category === 'minecraft') {
     appendConsoleLog(serverId, `[AetherPanel]: Provisioning Minecraft server runtime (${newServer.software} ${newServer.version})...`);
@@ -385,7 +410,8 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   appendConsoleLog(serverId, `[AetherPanel]: Server auto-provisioned successfully from template '${selectedSoftware}' on node ${targetNode.name}.`);
 
   try {
-    await startServer(serverId);
+    if (isVps) startServer(serverId).catch(() => {}); // image download can take minutes - runs in the background
+    else await startServer(serverId);
   } catch (err: any) {
     if (newServer && targetNode) {
       targetNode.usedRamMB -= resourceLimits.ramMB;

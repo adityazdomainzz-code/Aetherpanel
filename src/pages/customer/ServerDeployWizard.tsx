@@ -26,7 +26,7 @@ interface ServerDeployWizardProps {
 interface SoftwareOption {
   id: string;
   name: string;
-  category: 'minecraft' | 'bot';
+  category: 'minecraft' | 'bot' | 'vps';
   description: string;
   defaultVersion: string;
   versions: string[];
@@ -114,8 +114,22 @@ const SOFTWARE_CATALOG: SoftwareOption[] = [
     defaultVersion: 'Bun 1.2 (Latest)',
     versions: ['Bun 1.2 (Latest)', 'Bun 1.1', 'Bun 1.0'],
     icon: Zap
-  }
+  },
+
+  // VPS (Docker / LXC) - "version" = engine
+  ...[
+    ['ubuntu-22.04', 'Ubuntu 22.04', 'Long-term support Ubuntu with apt, root shell and full web terminal.'],
+    ['ubuntu-24.04', 'Ubuntu 24.04', 'Latest Ubuntu LTS release with a root shell and web terminal.'],
+    ['debian-12', 'Debian 12', 'Stable, minimal Debian Bookworm system.'],
+    ['alpine-3.20', 'Alpine 3.20', 'Tiny Alpine Linux (sh, apk) for very small VPS.'],
+  ].map(([id, name, description]) => ({
+    id, name, category: 'vps' as const, description,
+    defaultVersion: 'Docker', versions: ['Docker', 'LXC'], icon: Terminal,
+  }))
 ];
+
+const catOf = (c?: string): 'minecraft' | 'bot' | 'vps' => (c === 'vps' ? 'vps' : c === 'bot' ? 'bot' : 'minecraft');
+const prodOf = (c?: string) => (c === 'vps' ? 'prod_vps' : c === 'bot' ? 'prod_bot' : 'prod_minecraft');
 
 export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
   onNavigate,
@@ -137,11 +151,11 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
   const [selectedServerTypeId, setSelectedServerTypeId] = useState<string>('st_minecraft_java');
 
   // Selection States
-  const [selectedProductCategory, setSelectedProductCategory] = useState<'minecraft' | 'bot'>(
-    initialCategory === 'bot' ? 'bot' : 'minecraft'
+  const [selectedProductCategory, setSelectedProductCategory] = useState<'minecraft' | 'bot' | 'vps'>(
+    catOf(initialCategory)
   );
   const [selectedSoftware, setSelectedSoftware] = useState<SoftwareOption>(
-    SOFTWARE_CATALOG.find(s => s.category === (initialCategory === 'bot' ? 'bot' : 'minecraft')) || SOFTWARE_CATALOG[0]
+    SOFTWARE_CATALOG.find(s => s.category === catOf(initialCategory)) || SOFTWARE_CATALOG[0]
   );
   const [selectedVersion, setSelectedVersion] = useState<string>(selectedSoftware.defaultVersion);
   const [dynamicVersions, setDynamicVersions] = useState<string[]>(selectedSoftware.versions);
@@ -150,7 +164,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
   const [isLoadingVersions, setIsLoadingVersions] = useState<boolean>(false);
 
   const [serverName, setServerName] = useState<string>(
-    selectedProductCategory === 'minecraft' ? 'Minecraft Server' : 'Discord Bot Server'
+    selectedProductCategory === 'minecraft' ? 'Minecraft Server' : selectedProductCategory === 'vps' ? 'My VPS' : 'Discord Bot Server'
   );
   const [selectedLocation, setSelectedLocation] = useState<string>('auto');
   const [selectedPlanId, setSelectedPlanId] = useState<string>(initialPlanId || '');
@@ -244,7 +258,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
       if (res.data.plans) {
         setPlans(res.data.plans);
         if (!selectedPlanId && res.data.plans.length > 0) {
-          const matchingCategory = initialCategory === 'bot' ? 'prod_bot' : 'prod_minecraft';
+          const matchingCategory = prodOf(catOf(initialCategory));
           const defaultPlan = res.data.plans.find((p: Plan) => p.productId === matchingCategory) || res.data.plans[0];
           if (defaultPlan) setSelectedPlanId(defaultPlan.id);
         }
@@ -336,19 +350,19 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
     setServerName(`${software.name} Instance`);
 
     // Match plan
-    const matchingPlan = plans.find(p => p.productId === (software.category === 'minecraft' ? 'prod_minecraft' : 'prod_bot'));
+    const matchingPlan = plans.find(p => p.productId === prodOf(software.category));
     if (matchingPlan && !selectedPlanId) {
       setSelectedPlanId(matchingPlan.id);
     }
   };
 
-  const handleProductCategoryChange = (category: 'minecraft' | 'bot') => {
+  const handleProductCategoryChange = (category: 'minecraft' | 'bot' | 'vps') => {
     setSelectedProductCategory(category);
     const firstSoftware = SOFTWARE_CATALOG.find(s => s.category === category) || SOFTWARE_CATALOG[0];
     handleSelectSoftware(firstSoftware);
-    setServerName(category === 'minecraft' ? 'Minecraft Server' : 'Discord Bot Server');
+    setServerName(category === 'minecraft' ? 'Minecraft Server' : category === 'vps' ? 'My VPS' : 'Discord Bot Server');
 
-    const matchingPlan = plans.find(p => p.productId === (category === 'minecraft' ? 'prod_minecraft' : 'prod_bot'));
+    const matchingPlan = plans.find(p => p.productId === prodOf(category));
     if (matchingPlan) {
       setSelectedPlanId(matchingPlan.id);
     }
@@ -385,7 +399,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
   const currentProductPlans = plans.filter(p => {
     const prod = products.find(pr => pr.id === p.productId);
     if (!prod) {
-      return selectedProductCategory === 'minecraft' ? p.productId.includes('minecraft') : p.productId.includes('bot');
+      return p.productId === prodOf(selectedProductCategory) || p.productId.includes(selectedProductCategory);
     }
     return prod.category === selectedProductCategory;
   });
@@ -553,7 +567,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
           {step === 1 && (
         <div className="space-y-6 animate-in fade-in">
           {/* Category Toggle */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <button
               type="button"
               onClick={() => handleProductCategoryChange('minecraft')}
@@ -599,12 +613,35 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
                 </p>
               </div>
             </button>
+
+            <button
+              type="button"
+              onClick={() => handleProductCategoryChange('vps')}
+              className={`p-5 rounded-2xl border text-left transition flex items-start gap-4 ${
+                selectedProductCategory === 'vps'
+                  ? 'bg-amber-500/10 border-amber-500/40 text-white ring-1 ring-amber-500/20 shadow-[0_0_20px_rgba(245,158,11,0.05)]'
+                  : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-900'
+              }`}
+            >
+              <div className={`p-3 rounded-xl ${selectedProductCategory === 'vps' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-zinc-800 text-zinc-400'}`}>
+                <Terminal className="h-6 w-6" />
+              </div>
+              <div className="space-y-1">
+                <div className="font-extrabold text-white text-base flex items-center gap-2 tracking-tight">
+                  VPS Hosting
+                  {selectedProductCategory === 'vps' && <Crown className="h-4 w-4 text-amber-400" />}
+                </div>
+                <p className="text-xs text-zinc-400 leading-relaxed">
+                  Linux VPS (Docker / LXC) with root access and a web terminal.
+                </p>
+              </div>
+            </button>
           </div>
 
           {/* Software Options Grid */}
           <div className="space-y-3.5">
             <h2 className="text-xs font-extrabold uppercase tracking-widest text-zinc-400">
-              Select {selectedProductCategory === 'minecraft' ? 'Server Engine' : 'Programming Runtime'}
+              Select {selectedProductCategory === 'minecraft' ? 'Server Engine' : selectedProductCategory === 'vps' ? 'Operating System' : 'Programming Runtime'}
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {filteredSoftware.map(software => {
@@ -654,7 +691,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
-                  Software Version {isLoadingVersions && <Loader2 className="inline h-3 w-3 animate-spin text-amber-400 ml-1" />}
+                  {selectedProductCategory === 'vps' ? 'VPS Engine (Docker or LXC)' : 'Software Version'} {isLoadingVersions && <Loader2 className="inline h-3 w-3 animate-spin text-amber-400 ml-1" />}
                 </label>
                 <select
                   value={selectedVersion}
@@ -689,7 +726,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
                   ) : (
                     dynamicVersions.map((v, idx) => (
                       <option key={v} value={v}>
-                        {v} {idx === 0 && v !== 'UNKNOWN' ? '(Latest)' : ''}
+                        {v} {idx === 0 && v !== 'UNKNOWN' && selectedProductCategory !== 'vps' ? '(Latest)' : ''}
                       </option>
                     ))
                   )}
@@ -716,10 +753,10 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
               ) : (
                 <div>
                   <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
-                    Default Startup Entrypoint
+                    {selectedProductCategory === 'vps' ? 'Access' : 'Default Startup Entrypoint'}
                   </label>
                   <div className="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-400 font-mono">
-                    {selectedSoftware.id === 'python' ? 'main.py' : selectedSoftware.id === 'bun' ? 'index.ts' : selectedSoftware.id === 'golang' ? 'main.go' : selectedSoftware.id === 'rust' ? 'main.rs' : 'index.js'}
+                    {selectedProductCategory === 'vps' ? 'root shell · web terminal · /root = File Manager' : selectedSoftware.id === 'python' ? 'main.py' : selectedSoftware.id === 'bun' ? 'index.ts' : selectedSoftware.id === 'golang' ? 'main.go' : selectedSoftware.id === 'rust' ? 'main.rs' : 'index.js'}
                   </div>
                 </div>
               )}

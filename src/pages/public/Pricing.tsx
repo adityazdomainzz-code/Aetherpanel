@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Gamepad2, Bot, Check, ArrowRight, ShieldCheck, Sparkles } from 'lucide-react';
+import { Gamepad2, Bot, Check, ArrowRight, ShieldCheck, Sparkles, Server } from 'lucide-react';
 import { useTheme } from '../../lib/ThemeContext';
 import { apiRequest } from '../../lib/api';
 import { Plan } from '../../types';
@@ -10,7 +10,7 @@ interface PricingProps {
 
 export const Pricing: React.FC<PricingProps> = ({ onNavigate }) => {
   const { accentClasses } = useTheme();
-  const [activeCategory, setActiveCategory] = useState<'minecraft' | 'bot'>('minecraft');
+  const [activeCategory, setActiveCategory] = useState<'minecraft' | 'bot' | 'vps'>('minecraft');
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,6 +36,7 @@ export const Pricing: React.FC<PricingProps> = ({ onNavigate }) => {
     if (activeCategory === 'minecraft') {
       return p.productId === 'prod_minecraft' || p.id.startsWith('plan_mc_');
     }
+    if (activeCategory === 'vps') return p.productId === 'prod_vps';
     return p.productId === 'prod_bot' || p.id.startsWith('plan_bot_');
   });
 
@@ -49,7 +50,7 @@ export const Pricing: React.FC<PricingProps> = ({ onNavigate }) => {
         </p>
 
         {/* Category Switcher */}
-        <div className="pt-4 flex items-center justify-center gap-2">
+        <div className="pt-4 flex flex-wrap items-center justify-center gap-2">
           <button
             onClick={() => setActiveCategory('minecraft')}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
@@ -67,6 +68,15 @@ export const Pricing: React.FC<PricingProps> = ({ onNavigate }) => {
           >
             <Bot className="h-4 w-4" />
             <span>Discord Bot Hosting</span>
+          </button>
+          <button
+            onClick={() => setActiveCategory('vps')}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+              activeCategory === 'vps' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'bg-zinc-900 text-zinc-400 hover:text-white'
+            }`}
+          >
+            <Server className="h-4 w-4" />
+            <span>VPS Hosting</span>
           </button>
         </div>
 

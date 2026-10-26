@@ -123,7 +123,7 @@ export const AdminServers: React.FC = () => {
       setCreateError('Choose a user from the list and enter a server name.');
       return;
     }
-    if (createMode === 'plan' && createCategory !== 'vps' && !selectedPlan) {
+    if (createMode === 'plan' && !selectedPlan) {
       setCreateError('Choose a plan - its price is taken from the user\'s credits.');
       return;
     }
@@ -142,7 +142,7 @@ export const AdminServers: React.FC = () => {
         software: createSoftware,
         version: createVersion,
         ...(createCategory === 'vps' ? { vpsEngine, vpsOs } : {}),
-        ...(createMode === 'plan' && createCategory !== 'vps'
+        ...(createMode === 'plan'
           ? { planId: selectedPlan.id, billingCycle: createCycle }
           : { ramMB: createRam, cpuCores: createCpu, diskGB: createDisk })
       })
@@ -780,7 +780,7 @@ export const AdminServers: React.FC = () => {
                       setCreateCategory(val);
                       setSelectedPlanId('');
                       if (val === 'vps') {
-                        setCreateMode('custom');
+                        // VPS: OS + engine below
                       } else if (val === 'minecraft') {
                         setCreateSoftware('Paper');
                         loadAdminMinecraftVersions('Paper');
@@ -900,7 +900,7 @@ export const AdminServers: React.FC = () => {
 
               )}
 
-              {createCategory !== 'vps' && (
+              {(
               <div className="flex gap-2">
                 {(['plan', 'custom'] as const).map((m) => (
                   <button
@@ -915,7 +915,7 @@ export const AdminServers: React.FC = () => {
               </div>
               )}
 
-              {createMode === 'plan' && createCategory !== 'vps' ? (
+              {createMode === 'plan' ? (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-medium text-zinc-300">Plan *</label>
@@ -930,7 +930,7 @@ export const AdminServers: React.FC = () => {
                   </div>
                   {categoryPlans.length === 0 ? (
                     <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-zinc-500">
-                      No active {createCategory === 'bot' ? 'bot hosting' : 'Minecraft'} plans. Create one in Admin -&gt; Products, or use custom specs.
+                      No active {createCategory === 'bot' ? 'bot hosting' : createCategory === 'vps' ? 'VPS' : 'Minecraft'} plans. Create one in Admin -&gt; Products, or use custom specs.
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto">
@@ -1008,7 +1008,7 @@ export const AdminServers: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isCreating || !selectedUser || (createMode === 'plan' && createCategory !== 'vps' && (!selectedPlan || notEnough))}
+                  disabled={isCreating || !selectedUser || (createMode === 'plan' && (!selectedPlan || notEnough))}
                   className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-500/20 transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {isCreating ? <Loader2 className="h-4 w-4 animate-spin text-zinc-950" /> : <ServerIcon className="h-4 w-4 text-zinc-950" />}

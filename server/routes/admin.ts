@@ -1205,7 +1205,9 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
           version: version || undefined,
           billingCycle: billingCycle === 'yearly' ? 'yearly' : 'monthly',
           paymentMethod: 'balance',
-          adminProvision: { adminId: req.user!.id, adminEmail: req.user!.email }
+          adminProvision: { adminId: req.user!.id, adminEmail: req.user!.email },
+          vpsEngine: req.body.vpsEngine === 'lxc' ? 'lxc' : req.body.vpsEngine === 'docker' ? 'docker' : undefined,
+          vpsOs: req.body.vpsOs ? String(req.body.vpsOs) : undefined
         });
         const charged = parseFloat((balanceBefore - (targetUser.credits || 0)).toFixed(2));
         await createAuditLog(

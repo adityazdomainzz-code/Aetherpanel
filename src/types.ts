@@ -47,7 +47,7 @@ export interface UserAllocationStatus {
   unlimited: boolean;
 }
 
-export type ProductCategory = 'minecraft' | 'bot' | 'other';
+export type ProductCategory = 'minecraft' | 'bot' | 'vps' | 'other';
 
 export interface Product {
   id: string;

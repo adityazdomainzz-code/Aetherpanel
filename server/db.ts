@@ -15,6 +15,18 @@ import {
 } from '../src/types';
 import { migrateUserAllocations } from './services/allocationService';
 
+// VPS hosting product (Docker / LXC) - plans for it are created by the admin in Products & Plans
+const VPS_PRODUCT: Product = {
+  id: 'prod_vps',
+  slug: 'vps',
+  name: 'VPS Hosting',
+  description: 'Linux VPS (Docker / LXC containers) with root access, web terminal, file manager and backups.',
+  category: 'vps',
+  icon: 'Server',
+  isActive: true,
+  sortOrder: 3
+};
+
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
@@ -1329,6 +1341,7 @@ export async function getDb(reload = false): Promise<DatabaseSchema> {
         // Run authoritative user allocation migration
         migrateUserAllocations(dbCache);
 
+        if (Array.isArray(dbCache.products) && !dbCache.products.some(p => p.id === 'prod_vps')) dbCache.products.push({ ...VPS_PRODUCT });
         dbCache.nodes.forEach(n => {
           if (n.daemonPort === undefined) n.daemonPort = 8080;
           if (n.sftpPort === undefined) n.sftpPort = 2022;
@@ -1337,6 +1350,7 @@ export async function getDb(reload = false): Promise<DatabaseSchema> {
           if (n.diskOverallocatePercent === undefined) n.diskOverallocatePercent = 0;
           if (n.maxServers === undefined) n.maxServers = 100;
           if (!n.allowedProducts) n.allowedProducts = ['prod_minecraft', 'prod_bot'];
+          if ((n.id === 'node_local' || n.isLocalNode) && !n.allowedProducts.includes('prod_vps')) n.allowedProducts.push('prod_vps');
           if (!n.lastHeartbeatAt) n.lastHeartbeatAt = new Date().toISOString();
         });
 
@@ -1523,7 +1537,8 @@ async function generateInitialDb(): Promise<DatabaseSchema> {
       icon: 'Bot',
       isActive: true,
       sortOrder: 2
-    }
+    },
+    VPS_PRODUCT
   ];
 
   const plans: Plan[] = [

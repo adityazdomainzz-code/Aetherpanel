@@ -18,7 +18,7 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [faqs, setFaqs] = useState<any[]>([]);
   const [openFaqId, setOpenFaqId] = useState<string | null>(null);
-  const [activeCategory, setActiveCategory] = useState<'minecraft' | 'bot'>('minecraft');
+  const [activeCategory, setActiveCategory] = useState<'minecraft' | 'bot' | 'vps'>('minecraft');
   const [copiedIp, setCopiedIp] = useState(false);
 
   useEffect(() => {
@@ -82,6 +82,7 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
 
   const mcPlans = plans.filter(p => p.productId === 'prod_minecraft' || p.id.startsWith('plan_mc_'));
   const botPlans = plans.filter(p => p.productId === 'prod_bot' || p.id.startsWith('plan_bot_'));
+  const vpsPlans = plans.filter(p => p.productId === 'prod_vps');
 
   const minMcPrice = mcPlans.length > 0
     ? Math.min(...mcPlans.map(p => p.priceMonthly))
@@ -91,7 +92,9 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
     ? Math.min(...botPlans.map(p => p.priceMonthly))
     : 0.99;
 
-  const displayPlans = activeCategory === 'minecraft'
+  const displayPlans: any[] = activeCategory === 'vps'
+    ? vpsPlans.slice(0, 4) // only the VPS plans the admin created - no sample cards
+    : activeCategory === 'minecraft'
     ? (mcPlans.length > 0 ? mcPlans.slice(0, 4) : [
         { id: 'mc-basic', name: 'Starter Node', priceMonthly: 2.99, ramMB: 2048, cpuCores: 1, diskGB: 15, isPopular: false, backupLimit: 2, databaseLimit: 1 },
         { id: 'mc-pro', name: 'Performance Node', priceMonthly: 7.99, ramMB: 6144, cpuCores: 2, diskGB: 35, isPopular: true, backupLimit: 5, databaseLimit: 2 },
@@ -851,8 +854,21 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
               >
                 Discord Bot Hosting
               </button>
+              <button
+                type="button"
+                onClick={() => setActiveCategory('vps')}
+                className={`px-4 py-2 rounded-lg transition-colors cursor-pointer ${activeCategory === 'vps' ? 'bg-amber-400 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'}`}
+              >
+                VPS Hosting
+              </button>
             </div>
           </div>
+
+          {displayPlans.length === 0 && (
+            <div className="rounded-2xl border border-white/[0.06] bg-zinc-950/80 py-14 text-center text-sm text-zinc-500">
+              No VPS plans yet - check back soon.
+            </div>
+          )}
 
           {/* Pricing Cards Grid (4 Column, Medium Height) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 items-stretch">
@@ -877,7 +893,7 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
                       )}
                     </div>
                     <p className="text-xs text-zinc-400 mb-5">
-                      {activeCategory === 'minecraft' ? 'Dedicated game node' : '24/7 background worker'}
+                      {activeCategory === 'minecraft' ? 'Dedicated game node' : activeCategory === 'vps' ? 'Linux VPS with root access' : '24/7 background worker'}
                     </p>
 
                     <div className="flex items-baseline gap-1 mb-5">
