@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # AetherPanel updater - pulls the latest code from your GitHub repo and applies it step by step.
-# Keeps .env, data/ (database, ssh keys) and node_modules. Rolls back if the build fails.
+# Keeps .env, data/ (database, ssh keys) and node_modules untouched. Rolls back the code if the build fails.
+# No backup archives are made.
 # Usage:  sudo bash update.sh            (default folder /opt/aetherpanel)
 #         sudo bash update.sh /path/to/panel
 set -uo pipefail
@@ -9,7 +10,6 @@ REPO_URL="https://github.com/adityazdomainzz-code/Aetherpanel.git"
 BRANCH="main"
 DIR="${1:-/opt/aetherpanel}"
 SERVICE="aetherpanel"
-BACKUP_DIR="/opt/aetherpanel-backups"
 LOG="/var/log/aetherpanel-update.log"
 
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; C='\033[0;36m'; B='\033[1m'; N='\033[0m'
@@ -26,24 +26,17 @@ step 1 "Checking system"
 [ "$(id -u)" -eq 0 ] || die "Run as root: sudo bash update.sh"
 [ -d "$DIR" ] || die "Folder $DIR not found"
 cd "$DIR" || die "Cannot enter $DIR"
-for c in git node npm curl tar; do command -v "$c" >/dev/null || die "'$c' is not installed"; done
+for c in git node npm curl; do command -v "$c" >/dev/null || die "'$c' is not installed"; done
 [ -d .git ] || die "$DIR is not a git folder (run: git init && git remote add origin $REPO_URL)"
 ok "root, git, node $(node -v), npm $(npm -v)"
 
-# 2. backup
-step 2 "Backing up .env + data/ (+ current build)"
-mkdir -p "$BACKUP_DIR"
-STAMP=$(date +%Y%m%d-%H%M%S)
-BK="$BACKUP_DIR/aetherpanel-$STAMP.tar.gz"
-BK_LIST=(); for f in .env data; do [ -e "$f" ] && BK_LIST+=("$f"); done
-if [ ${#BK_LIST[@]} -gt 0 ]; then
-  tar --warning=no-file-changed -czf "$BK" "${BK_LIST[@]}"; rc=$?
-  [ $rc -le 1 ] || die "Backup failed (tar exit $rc)"   # 1 = file changed while reading (panel is running) - backup is still fine
-  ok "Backup: $BK"
-else warn "No .env / data found to back up"; fi
+# 2. remember current version (only for rollback - no backup archive)
+step 2 "Saving current version for rollback"
+ENV_SAVE=/tmp/aetherpanel-env.save
+rm -f "$ENV_SAVE"; [ -f .env ] && cp -p .env "$ENV_SAVE"
 rm -rf /tmp/aetherpanel-dist-old; [ -d dist ] && cp -a dist /tmp/aetherpanel-dist-old
-ls -1t "$BACKUP_DIR"/aetherpanel-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f   # keep last 10
 PREV=$(git rev-parse HEAD 2>/dev/null || echo "")
+ok "Current version: ${PREV:0:7}"
 
 # 3. .gitignore (secrets / big folders never go to GitHub)
 step 3 "Making sure secrets are never pushed (.gitignore)"
@@ -67,11 +60,11 @@ NEW=$(git rev-parse "origin/$BRANCH")
 if [ "$PREV" = "$NEW" ]; then warn "Already on the latest commit ($(git log -1 --format='%h %s' "$NEW")) - rebuilding anyway"
 else ok "New commits:"; git log --oneline "${PREV:+$PREV..}$NEW" 2>/dev/null | head -15 | sed 's/^/     /'; fi
 
-# 6. apply code (tracked files = GitHub version; .env, data/, node_modules are untouched)
+# 6. apply code (tracked files = GitHub version; .env, data/, node_modules stay)
 step 6 "Applying code"
 git reset -q --hard "origin/$BRANCH" || die "git reset failed"
 git checkout -q -B "$BRANCH" "origin/$BRANCH" 2>/dev/null || true
-if [ -f "$BK" ]; then tar -xzf "$BK" -C "$DIR" && ok "Restored .env + data/ from backup"; fi
+[ -f "$ENV_SAVE" ] && cp -p "$ENV_SAVE" .env   # your .env always stays
 ok "Now at $(git log -1 --format='%h %s')"
 
 # 7. required files check
@@ -87,7 +80,7 @@ grep -q "adityazdomainzz-code" server/updateService.ts 2>/dev/null && ok "Update
 rollback() {
   echo -e "${R}  Rolling back...${N}"
   [ -n "$PREV" ] && git reset -q --hard "$PREV"
-  [ -f "$BK" ] && tar -xzf "$BK" -C "$DIR"
+  [ -f "$ENV_SAVE" ] && cp -p "$ENV_SAVE" .env
   if [ -d /tmp/aetherpanel-dist-old ]; then rm -rf dist && cp -a /tmp/aetherpanel-dist-old dist; fi
   systemctl restart "$SERVICE" 2>/dev/null
   die "$1 - old version restored, panel still runs. Details: $LOG"
@@ -117,8 +110,8 @@ else
   journalctl -u "$SERVICE" -n 20 --no-pager
   rollback "Panel did not start"
 fi
-rm -rf /tmp/aetherpanel-dist-old
+rm -rf /tmp/aetherpanel-dist-old "$ENV_SAVE"
 
 echo -e "\n${G}${B}=== Update done! ===${N}  $(git log -1 --format='%h %s')"
-echo -e "Backup: ${BK}   Log: ${LOG}"
+echo -e "Log: ${LOG}"
 echo -e "Browser mein ${B}Ctrl+F5${N} daba ke panel refresh kar."
