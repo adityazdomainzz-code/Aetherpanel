@@ -551,7 +551,8 @@ export async function startServer(serverId: string): Promise<boolean> {
 
   if (category === 'bot') {
     const botCmdInfo = buildBotStartupCommand(server, server.startup, dir);
-    const { runtime, startupFile, args, compiledCommand, hasEntryFile, missingReason } = botCmdInfo;
+    const { runtime, compiledCommand, hasEntryFile, missingReason } = botCmdInfo;
+    let { startupFile, args } = botCmdInfo;
     if (!hasEntryFile) {
       const errReason = missingReason || `Startup failed. Entry file for ${runtime} was not found.`;
       appendConsoleLog(serverId, `[AetherDaemon/ERROR]: ${errReason}`);
@@ -575,7 +576,23 @@ export async function startServer(serverId: string): Promise<boolean> {
       return false;
     }
 
-    const executable = runtimeInfo.executable;
+    let executable = runtimeInfo.executable;
+
+    // "npm start" (package.json start script or custom "npm ..." command):
+    // "node file.js ..." scripts run node directly (clean stop/restart), anything else runs through npm.
+    if (runtime === 'nodejs' && botCmdInfo.executable === 'npm') {
+      let startScript = '';
+      try { startScript = String(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))?.scripts?.start || ''); } catch {}
+      const isStart = args.length === 1 && args[0] === 'start' || (args[0] === 'run' && args[1] === 'start');
+      const m = isStart ? /^\s*node\s+((?:--?[\w-]+(?:=\S+)?\s+)*)([^\s&|;]+)\s*([^&|;]*)$/.exec(startScript) : null;
+      if (m) {
+        startupFile = m[2].replace(/^\.\//, '');
+        args = [`--max-old-space-size=${server.limits?.ramMB || 512}`, ...m[1].trim().split(/\s+/).filter(Boolean), startupFile, ...m[3].trim().split(/\s+/).filter(Boolean)];
+      } else {
+        executable = resolveNpmExecutablePath();
+        startupFile = 'package.json';
+      }
+    }
 
     if (!server.startup) server.startup = {};
     server.startup.compiledCommand = `${executable} ${args.join(' ')}`;
@@ -631,7 +648,10 @@ export async function startServer(serverId: string): Promise<boolean> {
       }
     }
 
-    const scriptPath = path.join(dir, startupFile);
+    // "npm start" / "bun run start" use package.json scripts - check package.json, not the label
+    const usesPkgScript = /^package\.json/.test(startupFile)
+      || (botCmdInfo.executable === 'bun' && args[0] === 'run' && !!startupFile && !/\.[a-z0-9]+$/i.test(startupFile));
+    const scriptPath = path.join(dir, usesPkgScript ? 'package.json' : startupFile);
     if (!fs.existsSync(scriptPath)) {
       const errReason = `Startup failed. File: ${startupFile}. Reason: Startup file was not found.`;
       appendConsoleLog(serverId, `[AetherDaemon/ERROR]: ${errReason}`);
