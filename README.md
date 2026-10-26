@@ -16,20 +16,22 @@ Ensure your environment meets the following minimum requirements:
 * **Git**: System-level installation
 
 ### 2. Installation
-Clone the repository and initialize the project dependencies:
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/aetherpanel.git
-cd aetherpanel
+curl -fsSL https://github.com/adityazdomainzz-code/Aetherpanel/raw/main/install.sh -o install.sh
+sudo bash install.sh --panel --admin-email tera@email.com --admin-password 'MazbootPassword123'
 
-# Install dependencies
-npm install
+ #status 
+ systemctl status aetherpanel --no-pager | head -5
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/
+
+# for vps 
+apt install -y lxcfs && systemctl enable --now lxcfs      # Docker VPS mein sahi RAM dikhe
+apt install -y incus && incus admin init --minimal        # Ubuntu 24.04 / Debian 12
 ```
 
-### 3. Execution
-Launch the development environment:
+### 3. update panel 
 ```bash
-npm run dev
+sudo bash /opt/aetherpanel/update.sh
 ```
 The control plane will boot on **port 3000** by default.
 
