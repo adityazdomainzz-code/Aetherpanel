@@ -257,6 +257,7 @@ export interface Server {
   additionalPorts?: number[];
   location: string;
   software: string; // e.g., 'Paper', 'Purpur', 'Spigot', 'Node.js', 'Python'
+  vps?: { engine: 'docker' | 'lxc'; os: string; image: string; instanceName: string; hostname: string; cli?: 'incus' | 'lxc'; createdAt?: string };
   version: string; // e.g. '1.20.4', 'Node 20', 'Python 3.11'
   limits: ServerResourceLimits;
   resources?: ServerResources;

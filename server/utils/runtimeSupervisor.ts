@@ -291,6 +291,7 @@ export class RuntimeSupervisor {
         const node = db.nodes.find(n => n.id === server.nodeId);
         const isLocal = !node || node.isLocalNode || node.id === 'node_local';
         if (!isLocal) continue;
+        if ((server as any).vps) continue; // VPS state is synced by vpsService
 
         const paths = this.getRuntimePaths(server.id);
         if (!fs.existsSync(paths.stateJson)) {

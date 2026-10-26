@@ -21,9 +21,11 @@ import { ServerImporterTab } from '../../components/server/ServerImporterTab';
 import { ServerConsoleTab } from '../../components/server/ServerConsoleTab';
 import { ServerFileManagerTab } from '../../components/server/ServerFileManagerTab';
 import { ServerSubusersTab } from '../../components/server/ServerSubusersTab';
+import { ServerTerminalTab } from '../../components/server/ServerTerminalTab';
 import { TabTransition } from '../../components/animation/TabTransition';
 import { buildBotStartupCommand } from '../../lib/startup';
 import { normalizeServer, formatMemory } from '../../lib/serverNormalize';
+import { publishServerNav, setServerNavSelect, ServerNavState } from '../../lib/serverNav';
 import { normalizeServerPath, joinServerPath, getParentServerPath } from '../../lib/pathUtils';
 
 function getRecommendedJava(version?: string): number {
@@ -52,17 +54,17 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
   const { enablePlayit } = useBranding();
 
   const [server, setServer] = useState<Server | null>(null);
-  const [activeTab, setActiveTab] = useState<'console' | 'monitoring' | 'importer' | 'network' | 'files' | 'plugins' | 'properties' | 'env' | 'backups' | 'databases' | 'schedules' | 'discord' | 'settings' | 'activity' | 'subusers'>(
+  const [activeTab, setActiveTab] = useState<'terminal' | 'console' | 'monitoring' | 'importer' | 'network' | 'files' | 'plugins' | 'properties' | 'env' | 'backups' | 'databases' | 'schedules' | 'discord' | 'settings' | 'activity' | 'subusers'>(
     (initialTab as any) || 'console'
   );
 
   useEffect(() => {
-    if (initialTab && ['console', 'monitoring', 'importer', 'network', 'files', 'plugins', 'properties', 'env', 'backups', 'databases', 'schedules', 'discord', 'settings', 'activity', 'subusers'].includes(initialTab)) {
+    if (initialTab && ['terminal', 'console', 'monitoring', 'importer', 'network', 'files', 'plugins', 'properties', 'env', 'backups', 'databases', 'schedules', 'discord', 'settings', 'activity', 'subusers'].includes(initialTab)) {
       setActiveTab(initialTab as any);
     }
   }, [initialTab]);
 
-  const handleTabSelect = (tab: 'console' | 'monitoring' | 'importer' | 'network' | 'files' | 'plugins' | 'properties' | 'env' | 'backups' | 'databases' | 'schedules' | 'discord' | 'settings' | 'activity' | 'subusers') => {
+  const handleTabSelect = (tab: 'terminal' | 'console' | 'monitoring' | 'importer' | 'network' | 'files' | 'plugins' | 'properties' | 'env' | 'backups' | 'databases' | 'schedules' | 'discord' | 'settings' | 'activity' | 'subusers') => {
     if (activeTab === 'env' && isEnvDirty) {
       const confirmLeave = window.confirm("You have unsaved environment variable changes. Are you sure you want to leave and discard these changes?");
       if (!confirmLeave) return;
@@ -1202,6 +1204,24 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // VPS servers have their own tab set - send anything else to the terminal
+  const VPS_TABS = ['terminal', 'monitoring', 'files', 'importer', 'env', 'backups', 'schedules', 'activity', 'subusers'];
+  const serverIsVps = !!server && (server.productId === 'prod_vps' || !!(server as any).vps);
+  useEffect(() => {
+    if (serverIsVps && !VPS_TABS.includes(activeTab)) setActiveTab('terminal');
+    if (server && !serverIsVps && activeTab === 'terminal') setActiveTab('console');
+  }, [serverIsVps, activeTab, server?.id]);
+
+  // Sidebar server menu: publish the visible tabs after every render, clear on leave
+  const serverNavRef = useRef<ServerNavState | null>(null);
+  const tabSelectRef = useRef(handleTabSelect);
+  tabSelectRef.current = handleTabSelect;
+  useEffect(() => { publishServerNav(serverNavRef.current); });
+  useEffect(() => {
+    setServerNavSelect((tab) => tabSelectRef.current(tab as any));
+    return () => { setServerNavSelect(null); publishServerNav(null); };
+  }, []);
+
   if (loading) {
     return (
       <div className="p-12 text-center text-xs text-zinc-400 space-y-3">
@@ -1222,14 +1242,15 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
     );
   }
 
-  const fullIp = `${server.primaryIp || '127.0.0.1'}:${server.primaryPort || 25565}`;
+  const fullIp = (server.productId === 'prod_vps' || (server as any).vps) ? (server.primaryIp || '127.0.0.1') : `${server.primaryIp || '127.0.0.1'}:${server.primaryPort || 25565}`;
   const isRunning = server.status === 'running';
   const swLower = typeof server.software === 'string' ? server.software.toLowerCase() : '';
-  const isMinecraft = server.productId === 'prod_minecraft' || /minecraft|paper|purpur|vanilla|fabric|neoforge|forge|spigot|bedrock|velocity|bungee/i.test(swLower);
+  const isVps = serverIsVps;
+  const isMinecraft = !isVps && (server.productId === 'prod_minecraft' || /minecraft|paper|purpur|vanilla|fabric|neoforge|forge|spigot|bedrock|velocity|bungee/i.test(swLower));
   const isPython = swLower.includes('python') || Boolean(server.startup?.entryFile && server.startup.entryFile.endsWith('.py'));
   const isBun = swLower.includes('bun') || Boolean(server.startup?.entryFile && server.startup.entryFile.endsWith('.ts'));
   const isNode = !isMinecraft && !isPython && !isBun;
-  const isBot = server.productId === 'prod_bot' || swLower.includes('node') || isPython || isBun || isNode;
+  const isBot = !isVps && (server.productId === 'prod_bot' || swLower.includes('node') || isPython || isBun || isNode);
 
   const hasPerm = (perm: string) => {
     if (user?.role === 'admin' || user?.role === 'super_admin') return true;
@@ -1238,8 +1259,40 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
   };
   const canManageSubusers = user?.role === 'admin' || user?.role === 'super_admin' || !server?.isSubuser || hasPerm('subusers.view') || hasPerm('subusers.create') || hasPerm('subusers.update') || hasPerm('subusers.delete');
 
+  {
+    const t: ServerNavState['tabs'] = [];
+    if (isVps) {
+      if (hasPerm('console.view')) t.push({ id: 'terminal', label: 'Terminal', group: 'manage' });
+      if (hasPerm('console.view') || hasPerm('monitoring.view')) t.push({ id: 'monitoring', label: 'Monitoring & Metrics', group: 'manage' });
+      if (hasPerm('files.view')) t.push({ id: 'files', label: 'File Manager', group: 'files' });
+      if (hasPerm('files.create')) t.push({ id: 'importer', label: 'Server Importer', group: 'files' });
+      if (hasPerm('backups.view')) t.push({ id: 'backups', label: 'Backups', group: 'files', count: backups.length });
+      if (hasPerm('startup.update')) t.push({ id: 'env', label: 'Env & Variables', group: 'config' });
+      if (hasPerm('schedules.view')) t.push({ id: 'schedules', label: 'Schedules', group: 'config', count: schedules.length });
+      if (hasPerm('activity.view')) t.push({ id: 'activity', label: 'Audit Log', group: 'admin' });
+      if (canManageSubusers) t.push({ id: 'subusers', label: 'Subusers', group: 'admin' });
+    } else {
+    if (hasPerm('console.view')) t.push({ id: 'console', label: 'Console', group: 'manage' });
+    if (hasPerm('console.view') || hasPerm('monitoring.view')) t.push({ id: 'monitoring', label: 'Monitoring', group: 'manage' });
+    if (hasPerm('files.view')) t.push({ id: 'network', label: enablePlayit ? 'Network, SFTP & Playit' : 'Network & SFTP', group: 'manage' });
+    if (hasPerm('files.view')) t.push({ id: 'files', label: 'File Manager', group: 'files' });
+    if (hasPerm('files.create')) t.push({ id: 'importer', label: 'Server Importer', group: 'files' });
+    if (hasPerm('backups.view')) t.push({ id: 'backups', label: 'Backups', group: 'files', count: backups.length });
+    if (hasPerm('databases.view')) t.push({ id: 'databases', label: 'Databases', group: 'files', count: databases.length });
+    if (isMinecraft && hasPerm('plugins.view')) t.push({ id: 'plugins', label: 'Plugins', group: 'config' });
+    if (isMinecraft && hasPerm('startup.update')) t.push({ id: 'properties', label: 'Server Properties', group: 'config' });
+    if (isBot && hasPerm('startup.update')) t.push({ id: 'env', label: 'Environment Variables', group: 'config' });
+    if (hasPerm('schedules.view')) t.push({ id: 'schedules', label: 'Schedules', group: 'config', count: schedules.length });
+    if (hasPerm('startup.update')) t.push({ id: 'settings', label: 'Startup & Settings', group: 'config' });
+    if (hasPerm('discord.manage')) t.push({ id: 'discord', label: 'Discord Bot & Alerts', group: 'admin' });
+    if (canManageSubusers) t.push({ id: 'subusers', label: 'Subusers', group: 'admin' });
+    if (hasPerm('activity.view')) t.push({ id: 'activity', label: 'Audit Log', group: 'admin' });
+    }
+    serverNavRef.current = { serverId: server.id, name: server.name, software: String(server.software || ''), status: String(server.status || ''), activeTab, tabs: t };
+  }
+
   return (
-    <div className="space-y-6 p-4 sm:p-6 max-w-7xl mx-auto">
+    <div className="space-y-6 p-4 sm:p-6 max-w-7xl mx-auto w-full min-w-0">
       
       {/* Top Breadcrumb & Hero Banner with Server-Type Wallpaper */}
       <div className={`relative overflow-hidden p-6 rounded-2xl border transition-all ${
@@ -1287,11 +1340,11 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
                   ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
                   : 'bg-zinc-800 text-zinc-300 border-zinc-700'
               }`}>
-                {isMinecraft ? 'MINECRAFT' : isPython ? 'PYTHON BOT' : isBun ? 'BUN BOT' : 'NODE.JS BOT'}
+                {isVps ? `VPS · ${(server as any).vps?.engine === 'lxc' ? 'LXC' : 'DOCKER'}` : isMinecraft ? 'MINECRAFT' : isPython ? 'PYTHON BOT' : isBun ? 'BUN BOT' : 'NODE.JS BOT'}
               </span>
             </div>
             <p className="text-xs text-zinc-400 flex flex-wrap items-center gap-2">
-              <span className="font-medium text-zinc-300">{server.software} ({server.version})</span>
+              <span className="font-medium text-zinc-300">{isVps ? server.software : `${server.software} (${server.version})`}</span>
               <span>•</span>
               <span className="font-mono text-zinc-400">Node: {server.location}</span>
             </p>
@@ -1400,8 +1453,8 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
         </div>
       </div>
 
-      {/* Tabs Navigation - Responsive Mobile Dropdown + Touch Horizontal Scroll Bar */}
-      <div className="space-y-2">
+      {/* Tabs Navigation - desktop: left sidebar menu; mobile: dropdown */}
+      <div className="space-y-2 lg:hidden">
         {/* Mobile / Tablet Quick Select Dropdown (< lg screens) */}
         <div className="lg:hidden">
                 <label className="block text-[11px] font-semibold text-zinc-400 mb-1">Select Management View</label>
@@ -1410,6 +1463,17 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
                   onChange={(e) => handleTabSelect(e.target.value as any)}
                   className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs font-semibold rounded-xl px-3 py-2.5 focus:outline-none focus:border-amber-500"
                 >
+                  {isVps ? (<>
+                  {hasPerm('console.view') && <option value="terminal">💻 Terminal</option>}
+                  {(hasPerm('console.view') || hasPerm('monitoring.view')) && <option value="monitoring">📊 Monitoring & Metrics</option>}
+                  {hasPerm('files.view') && <option value="files">📁 File Manager</option>}
+                  {hasPerm('files.create') && <option value="importer">🚀 Server Importer</option>}
+                  {hasPerm('startup.update') && <option value="env">🔑 Env & Variables</option>}
+                  {hasPerm('backups.view') && <option value="backups">💾 Backups ({backups.length})</option>}
+                  {hasPerm('schedules.view') && <option value="schedules">⏱️ Schedules ({schedules.length})</option>}
+                  {hasPerm('activity.view') && <option value="activity">📋 Audit Log</option>}
+                  {canManageSubusers && <option value="subusers">👥 Subusers</option>}
+                  </>) : (<>
                   {hasPerm('console.view') && <option value="console">💻 Console Logs</option>}
                   {(hasPerm('console.view') || hasPerm('monitoring.view')) && <option value="monitoring">📊 Monitoring & Metrics</option>}
                   {hasPerm('files.view') && <option value="network">🌐 {enablePlayit ? 'Network, SFTP & Playit' : 'Network & SFTP'}</option>}
@@ -1425,11 +1489,12 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
                   {hasPerm('startup.update') && <option value="settings">⚡ Startup & Settings</option>}
                   {hasPerm('activity.view') && <option value="activity">📋 Audit Log</option>}
                   {canManageSubusers && <option value="subusers">👥 Subusers</option>}
+                  </>)}
                 </select>
               </div>
 
               {/* Scrollable Tabs Bar for lg+ screens */}
-        <div className="hidden lg:flex items-center gap-1.5 border-b border-zinc-800 overflow-x-auto pb-2 text-xs touch-scroll">
+        <div className="hidden">
           {hasPerm('console.view') && (
             <button
               onClick={() => handleTabSelect('console')}
@@ -1611,6 +1676,13 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
           )}
         </div>
       </div>
+
+      {/* VPS TERMINAL */}
+      {activeTab === 'terminal' && isVps && (
+        <TabTransition>
+          <ServerTerminalTab server={server} canType={!!hasPerm('console.send')} />
+        </TabTransition>
+      )}
 
       {/* TAB 1: CONSOLE LOGS */}
       {activeTab === 'console' && (

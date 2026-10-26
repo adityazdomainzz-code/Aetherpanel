@@ -7,6 +7,7 @@ import { Server, ServerFile, ServerBackup, ServerDatabase, ServerActivity } from
 import { dispatchDiscordNotification } from './discordService';
 import { buildBotStartupCommand } from '../src/lib/startup';
 import { RuntimeSupervisor } from './utils/runtimeSupervisor';
+import { isVpsServer, startVps, stopVps, runVpsCommand, destroyVps } from './services/vpsService';
 import { resolveBotRuntimeExecutable, resolveNpmExecutable, resolveNpmExecutablePath, getAugmentedEnv } from './utils/runtimeResolver';
 
 const SERVERS_DIR = path.join(process.cwd(), 'data', 'servers');
@@ -495,6 +496,7 @@ export async function startServer(serverId: string): Promise<boolean> {
   const db = await getDb();
   const server = db.servers.find(s => s.id === serverId);
   if (!server) return false;
+  if (isVpsServer(server)) return startVps(server);
 
   // Clear any existing pending auto-restart timer
   const existingRestartTimer = autoRestartTimers.get(serverId);
@@ -972,6 +974,7 @@ export async function stopServer(serverId: string): Promise<boolean> {
   const db = await getDb();
   const server = db.servers.find(s => s.id === serverId);
   if (!server) return false;
+  if (isVpsServer(server)) return stopVps(server);
 
   // Clear any scheduled auto-restart
   const pendingRestart = autoRestartTimers.get(serverId);
@@ -1024,6 +1027,7 @@ export async function killServer(serverId: string): Promise<boolean> {
   const db = await getDb();
   const server = db.servers.find(s => s.id === serverId);
   if (!server) return false;
+  if (isVpsServer(server)) return stopVps(server, true);
 
   // Clear any scheduled auto-restart
   const pendingRestart = autoRestartTimers.get(serverId);
@@ -1137,6 +1141,11 @@ export async function reinstallServer(serverId: string, newSoftware?: string, ne
   const db = await getDb();
   const server = db.servers.find(s => s.id === serverId);
   if (!server) return false;
+  if (isVpsServer(server)) { // fresh OS, files in /root stay
+    await stopVps(server, true);
+    await destroyVps(server);
+    return startVps(server);
+  }
 
   await stopServer(serverId);
 
@@ -1216,6 +1225,7 @@ export async function sendServerCommand(serverId: string, command: string): Prom
   if (!server) {
     return 'Server not found.';
   }
+  if (isVpsServer(server)) return runVpsCommand(server, command);
 
   // Check if server is running on a remote node
   const node = db.nodes.find(n => n.id === server.nodeId);

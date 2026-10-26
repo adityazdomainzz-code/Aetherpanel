@@ -1,3 +1,4 @@
+import { destroyVps } from '../services/vpsService';
 import { Router, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -2327,6 +2328,7 @@ router.delete('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Res
   closeServerConsoleClients(server.id, `Server '${server.name}' has been deleted.`);
 
   // Clean filesystem directory
+  await destroyVps(server).catch(() => {});
   const serverDir = getServerDir(server.id);
   if (fs.existsSync(serverDir)) {
     try {

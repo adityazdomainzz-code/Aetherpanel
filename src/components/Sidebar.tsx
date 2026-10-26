@@ -1,8 +1,23 @@
 import React from 'react';
 import {
   LayoutDashboard, Server, PlusCircle, CreditCard, LifeBuoy,
-  Activity, Settings, LogOut, ShieldCheck, ChevronDown, Cpu, Sparkles, Coins
+  Activity, Settings, LogOut, ShieldCheck, ChevronDown, Cpu, Sparkles, Coins,
+  ArrowLeft, Terminal, BarChart3, Globe, FolderOpen, UploadCloud, Puzzle, SlidersHorizontal,
+  KeyRound, Archive, Database, Clock, MessageSquare, Zap, ScrollText, Users
 } from 'lucide-react';
+import { useServerNav, selectServerTab } from '../lib/serverNav';
+
+const SERVER_TAB_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  terminal: Terminal, console: Terminal, monitoring: BarChart3, network: Globe, files: FolderOpen, importer: UploadCloud,
+  plugins: Puzzle, properties: SlidersHorizontal, env: KeyRound, backups: Archive, databases: Database,
+  schedules: Clock, discord: MessageSquare, settings: Zap, activity: ScrollText, subusers: Users,
+};
+const SERVER_TAB_GROUPS: { id: string; label: string }[] = [
+  { id: 'manage', label: 'Server' }, { id: 'files', label: 'Files & Data' },
+  { id: 'config', label: 'Configuration' }, { id: 'admin', label: 'Access & Logs' },
+];
+const statusColor = (st: string) =>
+  st === 'running' ? 'bg-emerald-400' : st === 'starting' || st === 'stopping' || st === 'installing' ? 'bg-amber-400 animate-pulse' : 'bg-zinc-500';
 import { useAuth } from '../lib/AuthContext';
 import { useTheme } from '../lib/ThemeContext';
 import { usePolicy, canDeploy } from '../lib/policy';
@@ -25,6 +40,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const { user, logout } = useAuth();
   const policy = usePolicy();
   const { accentClasses, accent, setActiveThemeId } = useTheme();
+  const serverNav = useServerNav();
+  const inServer = currentPage === 'server-manage' && !!serverNav && (!currentServerId || serverNav.serverId === currentServerId);
 
   return (
     <aside id="aether-sidebar" className="hidden lg:flex w-64 flex-none border-r border-white/5 bg-zinc-950/40 backdrop-blur-md flex-col h-full select-none z-20">
@@ -66,7 +83,60 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* Primary Navigation (Independently Scrollable) */}
+      {/* Server menu: shown on a server's own page (/servers/:id/:tab) */}
+      {inServer && serverNav ? (
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1 scrollbar-thin">
+        <button
+          onClick={() => onNavigate('servers')}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] font-semibold text-zinc-400 hover:text-white hover:bg-white/[0.03] transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          <span>All Servers</span>
+        </button>
+
+        <div className="mx-1 mb-2 p-3 rounded-xl bg-white/[0.03] border border-white/5">
+          <div className="flex items-center gap-2">
+            <span className={`h-2 w-2 rounded-full shrink-0 ${statusColor(serverNav.status)}`} />
+            <span className="text-xs font-bold text-white truncate">{serverNav.name}</span>
+          </div>
+          <div className="mt-1 text-[10px] text-zinc-500 font-mono truncate capitalize">
+            {serverNav.software || 'server'} · {serverNav.status || 'unknown'}
+          </div>
+        </div>
+
+        {SERVER_TAB_GROUPS.map((g) => {
+          const items = serverNav.tabs.filter((t) => t.group === g.id);
+          if (!items.length) return null;
+          return (
+            <div key={g.id} className="pb-1">
+              <div className="pt-2.5 pb-1 text-[9px] font-mono font-semibold uppercase tracking-widest text-zinc-500 px-3">
+                {g.label}
+              </div>
+              {items.map((t) => {
+                const Icon = SERVER_TAB_ICONS[t.id] || Server;
+                const active = serverNav.activeTab === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => selectServerTab(t.id, () => onNavigate('server-manage', { serverId: serverNav.serverId, initialTab: t.id }))}
+                    className={`w-full flex items-center justify-between px-3.5 py-2 rounded-xl text-xs font-semibold transition-all duration-300 cursor-pointer ${active ? 'bg-white/[0.06] text-white shadow-inner border border-white/5' : 'text-zinc-400 hover:text-white hover:bg-white/[0.02] border border-transparent'}`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <Icon className={`h-4 w-4 shrink-0 ${active ? accentClasses.text : ''}`} />
+                      <span className="truncate">{t.label}</span>
+                    </div>
+                    {typeof t.count === 'number' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.04] text-zinc-400 font-mono border border-white/5">{t.count}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+      ) : (
+      /* Primary Navigation (Independently Scrollable) */
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5 scrollbar-thin">
         <button
           onClick={() => onNavigate('dashboard')}
@@ -157,6 +227,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <span>Settings</span>
         </button>
       </div>
+      )}
 
       {/* User Footer & Theme Controls (Pinned Bottom) */}
       <div className="p-3 border-t border-white/5 space-y-3 shrink-0 bg-zinc-950/20">

@@ -1,3 +1,4 @@
+import { destroyVps, buildVpsInfo, detectVpsEngines, VPS_OS } from '../services/vpsService';
 import fs from 'fs';
 import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
@@ -417,6 +418,7 @@ router.delete('/users/:id', async (req: AuthenticatedRequest, res: Response) => 
     } catch (e) {}
     clearConsoleBuffer(srv.id);
     closeServerConsoleClients(srv.id, `Server deleted via user account termination.`);
+    await destroyVps(srv).catch(() => {});
     const serverDir = getServerDir(srv.id);
     if (fs.existsSync(serverDir)) {
       try {
@@ -1230,7 +1232,21 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
   }
 
   const category = hostingCategory || 'minecraft';
-  const targetNode = nodeId ? db.nodes.find(n => n.id === nodeId && n.status === 'online') : db.nodes.find(n => n.status === 'online' && !n.isMaintenanceMode);
+  const isVps = category === 'vps';
+  const vpsEngine: 'docker' | 'lxc' = req.body.vpsEngine === 'lxc' ? 'lxc' : 'docker';
+  const vpsOs = VPS_OS[req.body.vpsOs] ? String(req.body.vpsOs) : 'ubuntu-22.04';
+  if (isVps) {
+    const eng = await detectVpsEngines(true);
+    if (vpsEngine === 'docker' && !eng.docker) {
+      return res.status(400).json({ success: false, error: { code: 'VPS_ENGINE_MISSING', message: 'Docker is not installed or not running on the panel machine. Install it: curl -fsSL https://get.docker.com | sh' } });
+    }
+    if (vpsEngine === 'lxc' && !eng.lxc) {
+      return res.status(400).json({ success: false, error: { code: 'VPS_ENGINE_MISSING', message: 'LXC/Incus is not installed on the panel machine. Install incus and run: incus admin init --minimal' } });
+    }
+  }
+  const targetNode = isVps
+    ? db.nodes.find(n => n.id === 'node_local' || n.isLocalNode)
+    : nodeId ? db.nodes.find(n => n.id === nodeId && n.status === 'online') : db.nodes.find(n => n.status === 'online' && !n.isMaintenanceMode);
 
   if (!targetNode) {
     return res.status(507).json({
@@ -1266,9 +1282,9 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
     alloc.isAssigned = true;
   }
 
-  const resolvedSoftware = software || (category === 'minecraft' ? 'Paper' : 'Node.js');
-  const resolvedVersion = version || (category === 'minecraft' ? '26.2' : '20.x');
-  let resolvedServerTypeId = category === 'minecraft' ? 'st_minecraft_java' : (resolvedSoftware.toLowerCase().includes('python') ? 'st_python' : resolvedSoftware.toLowerCase().includes('bun') ? 'st_bun' : 'st_nodejs');
+  const resolvedSoftware = isVps ? `${VPS_OS[vpsOs].label} (${vpsEngine === 'docker' ? 'Docker' : 'LXC'})` : (software || (category === 'minecraft' ? 'Paper' : 'Node.js'));
+  const resolvedVersion = isVps ? vpsOs : (version || (category === 'minecraft' ? '26.2' : '20.x'));
+  let resolvedServerTypeId = isVps ? 'st_vps' : category === 'minecraft' ? 'st_minecraft_java' : (resolvedSoftware.toLowerCase().includes('python') ? 'st_python' : resolvedSoftware.toLowerCase().includes('bun') ? 'st_bun' : 'st_nodejs');
 
   const resolvedRes = resolveServerResources({
     db,
@@ -1305,7 +1321,9 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
     limits: serverLimits
   };
 
-  if (category === 'bot') {
+  if (isVps) {
+    startupConfig.compiledCommand = '';
+  } else if (category === 'bot') {
     const cmdObj = buildBotStartupCommand(tempServerContext, startupConfig);
     startupConfig.compiledCommand = cmdObj.compiledCommand;
   } else {
@@ -1316,12 +1334,12 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
     id: serverId,
     name: name.trim(),
     userId: targetUser.id,
-    productId: category === 'minecraft' ? 'prod_minecraft' : 'prod_bot',
-    planId: category === 'minecraft' ? 'plan_mc_custom' : 'plan_bot_custom',
+    productId: isVps ? 'prod_vps' : category === 'minecraft' ? 'prod_minecraft' : 'prod_bot',
+    planId: isVps ? 'plan_vps_custom' : category === 'minecraft' ? 'plan_mc_custom' : 'plan_bot_custom',
     nodeId: targetNode.id,
     serverTypeId: resolvedServerTypeId,
     deploymentState: 'READY',
-    status: 'running',
+    status: isVps ? 'installing' : 'running',
     primaryIp: effectiveIp,
     primaryPort: assignedPort,
     location: targetNode.locationName,
@@ -1334,6 +1352,7 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
       cpuPercent: resolvedRes.cpuPercent,
       diskGb: resolvedRes.diskGB
     },
+    ...(isVps ? { vps: buildVpsInfo(serverId, vpsEngine, vpsOs, name) } : {}),
     isAdminCreated: true, // Crucial: does not count towards user's 1-server allocation limit
     createdByAdmin: true,
     provisionSource: 'admin_assigned',
@@ -1353,6 +1372,11 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
   db.servers.push(newServer);
 
   import('../provider').then(p => {
+    if (isVps) {
+      p.appendConsoleLog(serverId, `[AetherPanel]: Admin provisioned VPS (${resolvedSoftware}) - creating it now...`);
+      p.startServer(serverId).catch(() => {});
+      return;
+    }
     p.initializeServerFiles(serverId, category, resolvedSoftware);
     if (category === 'minecraft') {
       p.appendConsoleLog(serverId, `[AetherPanel]: Admin provisioned Minecraft server (${resolvedSoftware} ${resolvedVersion}) with custom specs...`);
@@ -1407,6 +1431,7 @@ router.delete('/servers/:id', async (req: AuthenticatedRequest, res: Response) =
   closeServerConsoleClients(server.id, `Server '${server.name}' deleted by administrator.`);
 
   // 3. Remove filesystem directory recursively
+  await destroyVps(server).catch(() => {});
   const serverDir = getServerDir(server.id);
   if (fs.existsSync(serverDir)) {
     try {
@@ -1588,6 +1613,7 @@ router.post('/servers/bulk-delete', async (req: AuthenticatedRequest, res: Respo
       closeServerConsoleClients(server.id, `Server '${server.name}' deleted by administrator.`);
 
       // 3. Remove filesystem directory recursively
+      await destroyVps(server).catch(() => {});
       const serverDir = getServerDir(server.id);
       if (fs.existsSync(serverDir)) {
         try {

@@ -27,7 +27,9 @@ export const AdminServers: React.FC = () => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createEmail, setCreateEmail] = useState('');
   const [createServerName, setCreateServerName] = useState('Custom Server');
-  const [createCategory, setCreateCategory] = useState<'minecraft' | 'bot'>('minecraft');
+  const [createCategory, setCreateCategory] = useState<'minecraft' | 'bot' | 'vps'>('minecraft');
+  const [vpsEngine, setVpsEngine] = useState<'docker' | 'lxc'>('docker');
+  const [vpsOs, setVpsOs] = useState('ubuntu-22.04');
   const [createSoftware, setCreateSoftware] = useState('Paper');
   const [createVersion, setCreateVersion] = useState('26.2');
   const [adminMcVersions, setAdminMcVersions] = useState<string[]>([]);
@@ -121,7 +123,7 @@ export const AdminServers: React.FC = () => {
       setCreateError('Choose a user from the list and enter a server name.');
       return;
     }
-    if (createMode === 'plan' && !selectedPlan) {
+    if (createMode === 'plan' && createCategory !== 'vps' && !selectedPlan) {
       setCreateError('Choose a plan - its price is taken from the user\'s credits.');
       return;
     }
@@ -139,7 +141,8 @@ export const AdminServers: React.FC = () => {
         hostingCategory: createCategory,
         software: createSoftware,
         version: createVersion,
-        ...(createMode === 'plan'
+        ...(createCategory === 'vps' ? { vpsEngine, vpsOs } : {}),
+        ...(createMode === 'plan' && createCategory !== 'vps'
           ? { planId: selectedPlan.id, billingCycle: createCycle }
           : { ramMB: createRam, cpuCores: createCpu, diskGB: createDisk })
       })
@@ -773,10 +776,12 @@ export const AdminServers: React.FC = () => {
                   <select
                     value={createCategory}
                     onChange={(e) => {
-                      const val = e.target.value as 'minecraft' | 'bot';
+                      const val = e.target.value as 'minecraft' | 'bot' | 'vps';
                       setCreateCategory(val);
                       setSelectedPlanId('');
-                      if (val === 'minecraft') {
+                      if (val === 'vps') {
+                        setCreateMode('custom');
+                      } else if (val === 'minecraft') {
                         setCreateSoftware('Paper');
                         loadAdminMinecraftVersions('Paper');
                       } else {
@@ -788,10 +793,21 @@ export const AdminServers: React.FC = () => {
                   >
                     <option value="minecraft">Minecraft Hosting</option>
                     <option value="bot">Discord Bot & App</option>
+                    <option value="vps">VPS (Docker / LXC)</option>
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-zinc-300 mb-1">Software Engine</label>
+                  <label className="block text-xs font-medium text-zinc-300 mb-1">{createCategory === 'vps' ? 'VPS Engine' : 'Software Engine'}</label>
+                  {createCategory === 'vps' ? (
+                    <select
+                      value={vpsEngine}
+                      onChange={(e) => setVpsEngine(e.target.value as 'docker' | 'lxc')}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                    >
+                      <option value="docker">Docker container</option>
+                      <option value="lxc">LXC / Incus container</option>
+                    </select>
+                  ) : (
                   <select
                     value={createSoftware}
                     onChange={(e) => {
@@ -824,8 +840,28 @@ export const AdminServers: React.FC = () => {
                       </>
                     )}
                   </select>
+                  )}
                 </div>
               </div>
+
+              {createCategory === 'vps' ? (
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1">Operating System *</label>
+                <select
+                  value={vpsOs}
+                  onChange={(e) => setVpsOs(e.target.value)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                >
+                  <option value="ubuntu-22.04">Ubuntu 22.04</option>
+                  <option value="ubuntu-24.04">Ubuntu 24.04</option>
+                  <option value="debian-12">Debian 12</option>
+                  <option value="alpine-3.20">Alpine 3.20</option>
+                </select>
+                <p className="text-[10px] text-zinc-500 mt-1">
+                  Runs on this panel machine - {vpsEngine === 'docker' ? 'Docker must be installed (curl -fsSL https://get.docker.com | sh).' : 'Incus/LXC must be installed and initialised (incus admin init --minimal).'} The VPS /root folder is the File Manager.
+                </p>
+              </div>
+              ) : (
 
               <div>
                 <label className="block text-xs font-medium text-zinc-300 mb-1">
@@ -862,6 +898,9 @@ export const AdminServers: React.FC = () => {
                 </select>
               </div>
 
+              )}
+
+              {createCategory !== 'vps' && (
               <div className="flex gap-2">
                 {(['plan', 'custom'] as const).map((m) => (
                   <button
@@ -874,8 +913,9 @@ export const AdminServers: React.FC = () => {
                   </button>
                 ))}
               </div>
+              )}
 
-              {createMode === 'plan' ? (
+              {createMode === 'plan' && createCategory !== 'vps' ? (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-medium text-zinc-300">Plan *</label>
@@ -968,7 +1008,7 @@ export const AdminServers: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isCreating || !selectedUser || (createMode === 'plan' && (!selectedPlan || notEnough))}
+                  disabled={isCreating || !selectedUser || (createMode === 'plan' && createCategory !== 'vps' && (!selectedPlan || notEnough))}
                   className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-500/20 transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {isCreating ? <Loader2 className="h-4 w-4 animate-spin text-zinc-950" /> : <ServerIcon className="h-4 w-4 text-zinc-950" />}

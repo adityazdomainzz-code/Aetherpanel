@@ -30,6 +30,8 @@ import importerRoutes from './server/routes/importer';
 import { startSchedulerLoop } from './server/scheduler';
 import { startLocalNodeAgent } from './server/nodeAgent';
 import { setupConsoleWebSocket } from './server/consoleWs';
+import { setupVpsTerminalWebSocket } from './server/vpsTerminalWs';
+import { initVpsService } from './server/services/vpsService';
 import { startSftpDaemon } from './server/sftpServer';
 import { reconcileServerStatesOnBoot } from './server/provider';
 import { initializePlayitOnBoot } from './server/playitService';
@@ -319,6 +321,7 @@ async function startServer() {
   // Initialize WebSockets for live console streaming attached to express server
   try {
     setupConsoleWebSocket(server);
+    setupVpsTerminalWebSocket(server);
   } catch (wsErr) {
     console.warn('[AetherPanel] WebSocket initialization warning:', wsErr);
   }
@@ -351,6 +354,7 @@ async function startServer() {
 
     try {
       reconcileServerStatesOnBoot();
+      initVpsService().catch((e: any) => console.error('[AetherVPS] init failed:', e?.message));
     } catch (e) {
       console.warn('[AetherPanel] Lifecycle boot reconciliation init notice:', e);
     }

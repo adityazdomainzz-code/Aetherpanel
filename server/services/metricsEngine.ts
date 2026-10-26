@@ -1,3 +1,4 @@
+import { getVpsStats } from './vpsService';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -139,8 +140,13 @@ class HighConcurrencyMetricsEngine extends EventEmitter {
     let pidsCount = 1;
     let oomScore = 0;
 
+    const vpsStats = (server as any).vps ? getVpsStats(server.id) : null;
+    if (vpsStats) {
+      usedRamMB = vpsStats.ramMB;
+      cpuPercent = vpsStats.cpuPercent;
+    }
     // Direct /proc inspection without spawning child shell processes (Fast & safe for 100+ containers)
-    if (pid && pid > 0) {
+    if (!vpsStats && pid && pid > 0) {
       try {
         const procDir = `/proc/${pid}`;
         if (fs.existsSync(procDir)) {

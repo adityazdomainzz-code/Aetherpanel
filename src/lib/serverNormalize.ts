@@ -79,6 +79,7 @@ export function normalizeServer(apiServer: any): Server {
     primaryPort: Number(apiServer.primaryPort || 25565),
     location: String(apiServer.location || 'us-east'),
     software: String(apiServer.software || (isMinecraft ? 'Paper' : 'Node.js')),
+    vps: apiServer.vps,
     version: String(apiServer.version || (isMinecraft ? '1.20.4' : 'Node 20')),
     limits,
     resources,
