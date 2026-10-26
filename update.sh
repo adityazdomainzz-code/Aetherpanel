@@ -37,7 +37,8 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 BK="$BACKUP_DIR/aetherpanel-$STAMP.tar.gz"
 BK_LIST=(); for f in .env data; do [ -e "$f" ] && BK_LIST+=("$f"); done
 if [ ${#BK_LIST[@]} -gt 0 ]; then
-  tar -czf "$BK" "${BK_LIST[@]}" || die "Backup failed"
+  tar --warning=no-file-changed -czf "$BK" "${BK_LIST[@]}"; rc=$?
+  [ $rc -le 1 ] || die "Backup failed (tar exit $rc)"   # 1 = file changed while reading (panel is running) - backup is still fine
   ok "Backup: $BK"
 else warn "No .env / data found to back up"; fi
 rm -rf /tmp/aetherpanel-dist-old; [ -d dist ] && cp -a dist /tmp/aetherpanel-dist-old
