@@ -506,8 +506,15 @@ export async function startServer(serverId: string): Promise<boolean> {
   }
 
   if (activeProcesses.has(serverId)) {
-    appendConsoleLog(serverId, `[AetherDaemon/WARN]: Server process is already running.`);
-    return true;
+    // the process may have crashed (e.g. bad bot token) without clearing this entry - check it is really alive
+    const old: any = activeProcesses.get(serverId);
+    let alive = false;
+    if (old?.pid) { try { process.kill(old.pid, 0); alive = true; } catch {} }
+    if (alive && (old.child ? !old.child.killed && old.child.exitCode === null : RuntimeSupervisor.getStatus(serverId) !== 'stopped')) {
+      appendConsoleLog(serverId, `[AetherDaemon/WARN]: Server process is already running.`);
+      return true;
+    }
+    activeProcesses.delete(serverId); // stale entry from a crashed process - start fresh
   }
 
   server.status = 'starting';
