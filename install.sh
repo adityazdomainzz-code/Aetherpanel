@@ -22,7 +22,7 @@ set -Eeuo pipefail
 # ==============================================================================
 # 1. CENTRALIZED CONFIGURATION & ENVIRONMENT VARIABLES
 # ==============================================================================
-REPO_URL="https://github.com/mrrangerxd/aetherpanel"
+REPO_URL="https://github.com/adityazdomainzz-code/Aetherpanel"
 REPO_BRANCH="main"
 DEFAULT_ROOT_INSTALL_DIR="/opt/aetherpanel"
 DEFAULT_USER_INSTALL_DIR="${HOME:-/tmp}/aetherpanel"
