@@ -59,18 +59,6 @@ Use the following default credentials for your initial login. **You will be requ
 
 ---
 
-## 📡 Remote Node Deployment
-
-To enroll a remote VPS or dedicated server into your AetherPanel cluster:
-
-1. Navigate to **Admin -> Node Management -> Create Node**.
-2. Copy the **One-Time Enrollment Token**.
-3. Execute the automated installer on your remote Linux target:
-
-```bash
-curl -sSL http://your-panel-ip:3000/install.sh | bash -s -- --node --token YOUR_TOKEN --panel http://your-panel-ip:3000
-```
-
 ---
 
 ## 🌟 Core Capabilities
