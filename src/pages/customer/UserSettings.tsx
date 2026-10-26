@@ -11,9 +11,11 @@ import { THEME_PRESETS, FONT_OPTIONS } from '../../lib/theme';
 import { apiRequest } from '../../lib/api';
 import { DiscordAccount, ApiKey, WebhookSubscription } from '../../types';
 import { useToast } from '../../lib/ToastContext';
+import { useBranding } from '../../lib/BrandingContext';
 
 export const UserSettings: React.FC = () => {
   const { user, refreshUser } = useAuth();
+  const { discordUrl } = useBranding();
   const { toast } = useToast();
   const {
     accent, setAccent,
@@ -283,6 +285,109 @@ export const UserSettings: React.FC = () => {
         <p className="text-xs text-zinc-400 mt-1">Manage your identity, Discord integration, REST API tokens, and real-time Webhook subscriptions.</p>
       </div>
 
+      {/* Discord Integration */}
+      <div className="p-6 rounded-3xl bg-zinc-900 border border-zinc-800 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <MessageSquare className="h-4 w-4 text-indigo-400" /> Discord Account
+            </h3>
+            <p className="text-[11px] text-zinc-400 mt-1 max-w-xl">
+              Connect your Discord and invite friends to our Discord server. With enough invites you get a
+              <span className="text-white font-semibold"> free Minecraft server</span> or
+              <span className="text-white font-semibold"> free bot hosting</span> on this account.
+            </p>
+          </div>
+          {discordUrl && (
+            <a
+              href={discordUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 px-4 py-2 rounded-xl bg-zinc-950 border border-indigo-500/30 hover:border-indigo-400 text-indigo-300 text-xs font-semibold flex items-center gap-1.5"
+            >
+              <Link className="h-3.5 w-3.5" /> Join our Discord
+            </a>
+          )}
+        </div>
+
+        <ol className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+          {[
+            ['1', 'Connect Discord', 'Click the button below and allow access.'],
+            ['2', 'Invite friends', 'Share your invite link of our server. Check progress with !i'],
+            ['3', 'Claim your server', 'Type !buy mc (Minecraft) or !buy bot (bot hosting) in our Discord.'],
+          ].map(([n, t, d]) => (
+            <li key={n} className="p-3 rounded-xl bg-zinc-950 border border-zinc-800">
+              <div className="flex items-center gap-2 font-bold text-white">
+                <span className="h-5 w-5 rounded-full bg-indigo-500/15 text-indigo-300 flex items-center justify-center text-[10px]">{n}</span>
+                {t}
+              </div>
+              <div className="text-zinc-400 mt-1">{d}</div>
+            </li>
+          ))}
+        </ol>
+
+        {discordNotice && (
+          <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300">
+            {discordNotice}
+          </div>
+        )}
+
+        {loadingDiscord ? (
+          <div className="p-4 rounded-2xl bg-zinc-950 text-xs text-zinc-400 animate-pulse">
+            Checking Discord integration status...
+          </div>
+        ) : discordAccount ? (
+          <div className="p-4 rounded-2xl bg-zinc-950 border border-indigo-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <img
+                src={discordAccount.avatar}
+                alt={discordAccount.username}
+                className="w-12 h-12 rounded-full border border-indigo-500/30 object-cover"
+              />
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold text-white">{discordAccount.globalName || discordAccount.username}</span>
+                  <span className="text-[11px] font-mono text-zinc-400">({discordAccount.username})</span>
+                </div>
+                <div className="flex items-center gap-3 text-[11px] text-zinc-500 mt-0.5">
+                  <span>ID: <code className="text-indigo-300">{discordAccount.discordId}</code></span>
+                  <span>•</span>
+                  <span>Linked {new Date(discordAccount.linkedAt).toLocaleDateString()}</span>
+                </div>
+                <div className="text-[11px] text-emerald-400 font-semibold mt-1">✓ Connected - your free server from Discord invites goes to this account</div>
+              </div>
+            </div>
+
+            <button
+              onClick={handleDisconnectDiscord}
+              className="px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 text-xs font-semibold flex items-center gap-1.5"
+            >
+              <Unlink className="h-3.5 w-3.5" /> Disconnect Discord
+            </button>
+          </div>
+        ) : (
+          <div className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 text-center space-y-3">
+            <div className="w-10 h-10 rounded-full bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center mx-auto text-indigo-400">
+              <MessageSquare className="h-5 w-5" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-white">Discord not connected</h4>
+              <p className="text-[11px] text-zinc-400 max-w-md mx-auto mt-0.5">
+                Connect it once - the bot then knows this panel account and gives your free server here, no username needed.
+              </p>
+            </div>
+            <button
+              onClick={handleConnectDiscord}
+              disabled={connectingDiscord}
+              className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white flex items-center gap-2 mx-auto"
+            >
+              <Link className="h-4 w-4" />
+              <span>{connectingDiscord ? 'Connecting...' : 'Connect Discord'}</span>
+            </button>
+          </div>
+        )}
+      </div>
+
       {savedSuccess && (
         <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-xs font-semibold text-emerald-400 flex items-center gap-2">
           <Check className="h-4 w-4" /> Profile details updated successfully!
@@ -516,73 +621,6 @@ export const UserSettings: React.FC = () => {
           </button>
         </div>
       </form>
-
-      {/* Discord Integration */}
-      <div className="p-6 rounded-3xl bg-zinc-900 border border-zinc-800 space-y-5">
-        <h3 className="text-base font-bold text-white flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-indigo-400" /> Discord Account Integration
-        </h3>
-
-        {discordNotice && (
-          <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300">
-            {discordNotice}
-          </div>
-        )}
-
-        {loadingDiscord ? (
-          <div className="p-4 rounded-2xl bg-zinc-950 text-xs text-zinc-400 animate-pulse">
-            Checking Discord integration status...
-          </div>
-        ) : discordAccount ? (
-          <div className="p-4 rounded-2xl bg-zinc-950 border border-indigo-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <img
-                src={discordAccount.avatar}
-                alt={discordAccount.username}
-                className="w-12 h-12 rounded-full border border-indigo-500/30 object-cover"
-              />
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-white">{discordAccount.globalName || discordAccount.username}</span>
-                  <span className="text-[11px] font-mono text-zinc-400">({discordAccount.username})</span>
-                </div>
-                <div className="flex items-center gap-3 text-[11px] text-zinc-500 mt-0.5">
-                  <span>ID: <code className="text-indigo-300">{discordAccount.discordId}</code></span>
-                  <span>•</span>
-                  <span>Linked {new Date(discordAccount.linkedAt).toLocaleDateString()}</span>
-                </div>
-              </div>
-            </div>
-
-            <button
-              onClick={handleDisconnectDiscord}
-              className="px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 text-xs font-semibold flex items-center gap-1.5"
-            >
-              <Unlink className="h-3.5 w-3.5" /> Disconnect Discord
-            </button>
-          </div>
-        ) : (
-          <div className="p-5 rounded-2xl bg-zinc-950 border border-zinc-800 text-center space-y-3">
-            <div className="w-10 h-10 rounded-full bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center mx-auto text-indigo-400">
-              <MessageSquare className="h-5 w-5" />
-            </div>
-            <div>
-              <h4 className="text-xs font-bold text-white">No Discord Account Connected</h4>
-              <p className="text-[11px] text-zinc-400 max-w-md mx-auto mt-0.5">
-                Authorize AetherPanel on Discord to control your Minecraft servers, Discord bots, and node instances directly from Discord channels.
-              </p>
-            </div>
-            <button
-              onClick={handleConnectDiscord}
-              disabled={connectingDiscord}
-              className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white flex items-center gap-2 mx-auto"
-            >
-              <Link className="h-4 w-4" />
-              <span>{connectingDiscord ? 'Authorizing OAuth2...' : 'Connect Discord Account'}</span>
-            </button>
-          </div>
-        )}
-      </div>
 
       {/* REAL WEBHOOKS INTEGRATION */}
       <div className="p-6 rounded-3xl bg-zinc-900 border border-zinc-800 space-y-6">
