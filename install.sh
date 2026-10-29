@@ -13,7 +13,7 @@
 #                    DEFAULT PORT: 3000
 #                    Made with ❤ by ZenseiBabe
 #
-# Official Source Repository: https://github.com/mrrangerxd/aetherpanel
+# Source Repository: https://github.com/adityazdomainzz-code/Aetherpanel
 # Universal Cross-Platform Installer, Updater & Node Pairer v4.0
 # ==============================================================================
 
@@ -1745,6 +1745,204 @@ EOF
 }
 
 # ==============================================================================
+# 12b. CONNECT ANOTHER NODE (run on the PANEL machine) / MAKE THIS VPS A NODE (run on the NEW machine)
+# ==============================================================================
+connect_another_node() {
+  init_paths
+  echo -e "\n${PURPLE}${BOLD}=== CONNECT ANOTHER NODE (run this on the PANEL machine) ===${NC}\n"
+  local dir="${INSTALL_DIR:-/opt/aetherpanel}"
+  [ -d "$dir" ] || dir="/opt/aetherpanel"
+  local key_file="$dir/data/.node-local-key"
+  if [ ! -f "$key_file" ]; then
+    echo -e "${RED}[ERROR] AetherPanel was not found here ($dir). Run this option on the machine where the panel is installed${NC}"
+    echo -e "${RED}        (and update the panel first: sudo bash $dir/update.sh).${NC}"
+    return 1
+  fi
+  local port
+  port=$(grep -E '^PORT=' "$dir/.env" 2>/dev/null | cut -d= -f2 | tr -d '"'"'"' ' || true)
+  port="${port:-${PANEL_PORT:-3000}}"
+  if ! curl -s -o /dev/null -m 5 "http://127.0.0.1:${port}/"; then
+    echo -e "${RED}[ERROR] The panel is not running on port ${port} (systemctl restart aetherpanel).${NC}"
+    return 1
+  fi
+
+  local node_name="${NODE_NAME:-}"
+  [ -n "$node_name" ] || node_name=$(prompt_input "Node name (e.g. germany-1): ")
+  if [ -z "$node_name" ]; then echo -e "${RED}[ERROR] Node name is required.${NC}"; return 1; fi
+
+  local default_url
+  default_url=$(grep -E '^PANEL_URL=' "$dir/.env" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' ' || true)
+  local public_url="${PANEL_URL:-}"
+  if [ -z "$public_url" ]; then
+    echo -e "${CYAN}The node connects to the panel at this address. Use your public domain (https://panel.example.com),${NC}"
+    echo -e "${CYAN}not localhost - the node must be able to open it.${NC}"
+    public_url=$(prompt_input "Panel public URL [${default_url:-https://panel.example.com}]: ")
+    public_url="${public_url:-$default_url}"
+  fi
+  public_url="${public_url%/}"
+  if [[ ! "$public_url" =~ ^https?:// ]]; then echo -e "${RED}[ERROR] Panel URL must start with http:// or https://${NC}"; return 1; fi
+
+  local body resp
+  body=$(printf '{"name":"%s","panelUrl":"%s"}' "$(echo "$node_name" | tr -d '"\\')" "$public_url")
+  resp=$(curl -s -m 15 -X POST "http://127.0.0.1:${port}/api/v1/node/local/create-connect" \
+    -H "Content-Type: application/json" -H "X-Local-Key: $(cat "$key_file")" -d "$body" || true)
+  local connect_url
+  connect_url=$(echo "$resp" | grep -o '"connectUrl":"[^"]*' | cut -d'"' -f4 || true)
+  if [ -z "$connect_url" ]; then
+    echo -e "${RED}[ERROR] Could not create the node:${NC} $resp"
+    return 1
+  fi
+
+  echo -e "\n${GREEN}${BOLD}[✓] Node '${node_name}' created.${NC} Daemon URL (valid 24 hours, one use):\n"
+  echo -e "    ${BOLD}${connect_url}${NC}\n"
+  echo -e "${CYAN}Now on the NEW server (KVM / dedicated / Proxmox VM - not Docker), run:${NC}"
+  echo -e "    ${BOLD}bash <(curl -fsSL ${REPO_URL}/raw/main/install.sh) --make-node '${connect_url}'${NC}"
+  echo -e "${CYAN}or run install.sh there and choose \"Make this VPS a node\" and paste the URL.${NC}\n"
+}
+
+make_this_vps_node() {
+  init_paths
+  echo -e "\n${PURPLE}${BOLD}=== MAKE THIS VPS A NODE ===${NC}\n"
+  if [ "$(id -u)" -ne 0 ]; then echo -e "${RED}[ERROR] Run as root (sudo).${NC}"; return 1; fi
+
+  # 1. this machine must be able to run LXC containers / KVM VMs - not a Docker/LXC/OpenVZ container itself
+  local virt="none" in_container=""
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    virt=$(systemd-detect-virt 2>/dev/null || echo none)
+    in_container=$(systemd-detect-virt -c 2>/dev/null || true)
+    [ "$in_container" = "none" ] && in_container=""
+  fi
+  [ -f /.dockerenv ] && in_container="docker"
+  grep -qaE 'docker|containerd|kubepods' /proc/1/cgroup 2>/dev/null && in_container="${in_container:-docker}"
+  if [ -n "$in_container" ]; then
+    echo -e "${RED}[ERROR] This machine is a '${in_container}' container. A node needs a real KVM VPS, a Proxmox VM or a dedicated server${NC}"
+    echo -e "${RED}        (LXC containers / KVM VMs cannot run inside Docker/LXC/OpenVZ).${NC}"
+    return 1
+  fi
+  local has_kvm=false
+  [ -e /dev/kvm ] && has_kvm=true
+  echo -e "${GREEN}[✓] Virtualization: ${virt} · KVM for VMs: ${has_kvm}${NC}"
+
+  # 2. daemon URL from "Connect another node" on the panel machine
+  local url="${NODE_CONNECT_URL:-}"
+  [ -n "$url" ] || url=$(prompt_input "Paste the daemon URL from the panel: ")
+  url=$(echo "$url" | tr -d ' \r\n')
+  if [[ ! "$url" =~ ^(https?://.+)/api/v1/node/join/([A-Za-z0-9_]+)$ ]]; then
+    echo -e "${RED}[ERROR] That is not a daemon URL (it looks like https://panel.example.com/api/v1/node/join/ntok_...).${NC}"
+    return 1
+  fi
+  local panel="${BASH_REMATCH[1]}" token="${BASH_REMATCH[2]}"
+  if ! (curl -s -m 15 "$panel/api/v1/node/join/$token" 2>/dev/null | grep -q '"success":true'); then
+    echo -e "${RED}[ERROR] The panel says this URL is invalid, expired or already used - create a new one on the panel machine.${NC}"
+    echo -e "${RED}        (also check that this server can open ${panel})${NC}"
+    return 1
+  fi
+  echo -e "${GREEN}[✓] Panel reachable: ${panel}${NC}"
+
+  # 3. packages: python3 (terminal), Node.js 22 (agent), Incus (LXC + KVM)
+  export DEBIAN_FRONTEND=noninteractive
+  echo -e "${YELLOW}[1/4] Installing packages...${NC}"
+  apt-get update -y >> "$LOG_FILE" 2>&1 || true
+  apt-get install -y curl ca-certificates gnupg python3 >> "$LOG_FILE" 2>&1 || true
+  local node_major=0
+  if command -v node >/dev/null 2>&1; then node_major=$(node -v | sed 's/v//' | cut -d. -f1 || echo 0); fi
+  if [ "${node_major:-0}" -lt 22 ]; then
+    { curl -fsSL https://deb.nodesource.com/setup_22.x | bash - ; } >> "$LOG_FILE" 2>&1 || true
+    apt-get install -y nodejs >> "$LOG_FILE" 2>&1 || true
+  fi
+  if ! command -v node >/dev/null 2>&1; then echo -e "${RED}[ERROR] Node.js could not be installed (see $LOG_FILE).${NC}"; return 1; fi
+  echo -e "${GREEN}[✓] Node.js $(node -v)${NC}"
+
+  echo -e "${YELLOW}[2/4] Installing Incus (LXC containers + KVM VMs)...${NC}"
+  if ! command -v incus >/dev/null 2>&1; then
+    if ! apt-get install -y incus >> "$LOG_FILE" 2>&1; then
+      mkdir -p /etc/apt/keyrings
+      curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc >> "$LOG_FILE" 2>&1 || true
+      . /etc/os-release
+      cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources <<EOF
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: ${VERSION_CODENAME}
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+EOF
+      apt-get update -y >> "$LOG_FILE" 2>&1 || true
+      apt-get install -y incus >> "$LOG_FILE" 2>&1 || true
+    fi
+  fi
+  if ! command -v incus >/dev/null 2>&1; then echo -e "${RED}[ERROR] Incus could not be installed (see $LOG_FILE). Supported: Ubuntu 22.04/24.04, Debian 12.${NC}"; return 1; fi
+  if [ "$has_kvm" = true ]; then apt-get install -y qemu-system-x86 >> "$LOG_FILE" 2>&1 || true; fi
+  if ! (incus storage list --format csv 2>/dev/null | grep -q .); then
+    incus admin init --minimal >> "$LOG_FILE" 2>&1 || true
+  fi
+  incus list >/dev/null 2>&1 || { echo -e "${RED}[ERROR] Incus is installed but not working: run 'incus admin init --minimal' and retry.${NC}"; return 1; }
+  # Docker sets FORWARD to DROP which cuts LXC internet - let incusbr0 through
+  if command -v iptables >/dev/null 2>&1 && iptables -L DOCKER-USER >/dev/null 2>&1; then
+    iptables -C DOCKER-USER -i incusbr0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+    iptables -C DOCKER-USER -o incusbr0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o incusbr0 -j ACCEPT
+  fi
+  echo -e "${GREEN}[✓] Incus $(incus version 2>/dev/null | head -1)${NC}"
+
+  # 4. agent + enroll
+  echo -e "${YELLOW}[3/4] Downloading the node agent from the panel...${NC}"
+  mkdir -p /opt/aethernode /etc/aethernode /var/log/aethernode
+  if ! curl -fsSL "$panel/api/v1/node/agent.js" -o /opt/aethernode/agent.js || ! grep -q "AetherNode agent" /opt/aethernode/agent.js; then
+    echo -e "${RED}[ERROR] Could not download the agent from the panel - update the panel first (it needs node-agent/agent.js).${NC}"
+    return 1
+  fi
+
+  echo -e "${YELLOW}[4/4] Connecting to the panel...${NC}"
+  local ip os_name ram_mb cpus disk_gb
+  ip=$(curl -s -4 -m 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || true)
+  os_name=$(. /etc/os-release; echo "$PRETTY_NAME")
+  ram_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+  cpus=$(nproc)
+  disk_gb=$(df -BG --output=size / 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+  local enroll
+  enroll=$(curl -s -m 20 -X POST "$panel/api/v1/node/enroll" -H "Content-Type: application/json" -d "{
+    \"token\": \"$token\", \"ip\": \"${ip:-0.0.0.0}\", \"totalRamMB\": ${ram_mb:-0}, \"totalCpuCores\": ${cpus:-0}, \"totalDiskGB\": ${disk_gb:-0},
+    \"capabilities\": {\"virt\": \"$virt\", \"kvm\": $has_kvm, \"incus\": true, \"os\": \"$os_name\", \"hostname\": \"$(hostname)\", \"agentVersion\": \"2\"}
+  }" || true)
+  local dtoken nid
+  dtoken=$(echo "$enroll" | grep -o '"daemonToken":"[^"]*' | cut -d'"' -f4 || true)
+  nid=$(echo "$enroll" | grep -o '"nodeId":"[^"]*' | cut -d'"' -f4 || true)
+  if [ -z "$dtoken" ]; then echo -e "${RED}[ERROR] The panel refused this node:${NC} $enroll"; return 1; fi
+
+  cat > /etc/aethernode/config.json <<EOF
+{ "panelUrl": "$panel", "nodeId": "$nid", "daemonToken": "$dtoken" }
+EOF
+  chmod 600 /etc/aethernode/config.json
+  cat > /etc/systemd/system/aethernode.service <<EOF
+[Unit]
+Description=AetherNode agent (AetherPanel VPS node)
+After=network-online.target incus.service
+Wants=network-online.target
+
+[Service]
+ExecStart=$(command -v node) /opt/aethernode/agent.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/aethernode/agent.log
+StandardError=append:/var/log/aethernode/agent.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload || true
+  systemctl enable --now aethernode >> "$LOG_FILE" 2>&1 || true
+  sleep 4
+  if systemctl is-active --quiet aethernode; then
+    echo -e "\n${GREEN}${BOLD}[✓] This VPS is now a node of ${panel}${NC}"
+    echo -e "    Node ID: ${nid} · KVM VMs: ${has_kvm} · Logs: tail -f /var/log/aethernode/agent.log"
+    echo -e "    In the panel: Admin -> All Servers -> Create -> VPS -> pick this node.\n"
+  else
+    echo -e "${RED}[ERROR] The agent did not start:${NC}"; tail -20 /var/log/aethernode/agent.log 2>/dev/null; return 1
+  fi
+}
+
+# ==============================================================================
 # 13. OPTION 3: UPDATE PANEL (SAFE GITHUB PULL & REBUILD)
 # ==============================================================================
 update_panel() {
@@ -2038,6 +2236,16 @@ while [[ $# -gt 0 ]]; do
       SHOW_MENU=false
       shift
       ;;
+    --make-node)
+      MODE="makenode"
+      SHOW_MENU=false
+      if [ $# -ge 2 ] && [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then NODE_CONNECT_URL="$2"; shift 2; else shift; fi
+      ;;
+    --connect-node)
+      MODE="connectnode"
+      SHOW_MENU=false
+      if [ $# -ge 2 ] && [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then NODE_NAME="$2"; shift 2; else shift; fi
+      ;;
     --panel)
       MODE="panel"
       SHOW_MENU=false
@@ -2126,7 +2334,8 @@ while [[ $# -gt 0 ]]; do
       echo -e "  bash install.sh                                         # Interactive Menu"
       echo -e "  bash install.sh --panel --url http://IP:3000 --port 3000 # Automated Panel Install"
       echo -e "  bash install.sh --update                                # Pull Latest GitHub Code"
-      echo -e "  bash install.sh --node --url http://IP:3000 --token TOK # Automated Node Pairing"
+      echo -e "  bash install.sh --connect-node NAME                     # (panel machine) create a node + daemon URL"
+      echo -e "  bash install.sh --make-node 'DAEMON_URL'                # (new server) make this VPS a node"
       echo -e "  bash install.sh --repair                                # System Diagnostics"
       exit 0
       ;;
@@ -2138,7 +2347,9 @@ done
 
 if [ "$SHOW_MENU" = false ]; then
   case "${MODE:-}" in
-    node) install_node_daemon ;;
+    node) make_this_vps_node ;;
+    makenode) make_this_vps_node ;;
+    connectnode) connect_another_node ;;
     panel) install_panel ;;
     update) update_panel ;;
     reinstall) reinstall_panel ;;
@@ -2158,13 +2369,14 @@ while true; do
   print_banner
   echo -e "${BOLD}Select an action from the menu options below:${NC}\n"
   echo -e "  ${GREEN}1)${NC} Panel Installation"
-  echo -e "  ${GREEN}2)${NC} Node Installation"
+  echo -e "  ${GREEN}2)${NC} Make this VPS a Node (paste daemon URL)"
   echo -e "  ${GREEN}3)${NC} Update Panel"
   echo -e "  ${GREEN}4)${NC} Reinstall Panel"
   echo -e "  ${GREEN}5)${NC} Uninstall Panel"
   echo -e "  ${GREEN}6)${NC} Tutorial (Installation)"
   echo -e "  ${GREEN}7)${NC} System Health Verification & Repair"
   echo -e "  ${GREEN}8)${NC} Create Admin User"
+  echo -e "  ${GREEN}9)${NC} Connect another Node (run on the panel machine)"
   echo -e "  ${RED}0)${NC} Exit\n"
 
   if [ ! -t 0 ] && ! (exec < /dev/tty) 2>/dev/null; then
@@ -2172,10 +2384,11 @@ while true; do
     exit 0
   fi
 
-  CHOICE=$(prompt_input "Enter choice [0-8]: ")
+  CHOICE=$(prompt_input "Enter choice [0-9]: ")
   case "${CHOICE:-0}" in
     1) install_panel; prompt_input "Press Enter to return to menu..." > /dev/null ;;
-    2) install_node_daemon; prompt_input "Press Enter to return to menu..." > /dev/null ;;
+    2) make_this_vps_node; prompt_input "Press Enter to return to menu..." > /dev/null ;;
+    9) connect_another_node; prompt_input "Press Enter to return to menu..." > /dev/null ;;
     3) update_panel; prompt_input "Press Enter to return to menu..." > /dev/null ;;
     4) reinstall_panel; prompt_input "Press Enter to return to menu..." > /dev/null ;;
     5) uninstall_system; prompt_input "Press Enter to return to menu..." > /dev/null ;;
@@ -2195,7 +2408,7 @@ while true; do
       exit 0
       ;;
     *)
-      echo -e "${RED}Invalid selection. Please choose an option between 0 and 8.${NC}"
+      echo -e "${RED}Invalid selection. Please choose an option between 0 and 9.${NC}"
       sleep 1
       ;;
   esac

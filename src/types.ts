@@ -257,7 +257,7 @@ export interface Server {
   additionalPorts?: number[];
   location: string;
   software: string; // e.g., 'Paper', 'Purpur', 'Spigot', 'Node.js', 'Python'
-  vps?: { engine: 'docker' | 'lxc'; os: string; image: string; instanceName: string; hostname: string; cli?: 'incus' | 'lxc'; createdAt?: string };
+  vps?: { engine: 'docker' | 'lxc' | 'vm'; os: string; image: string; instanceName: string; hostname: string; cli?: 'incus' | 'lxc'; createdAt?: string; remote?: boolean; nodeId?: string };
   version: string; // e.g. '1.20.4', 'Node 20', 'Python 3.11'
   limits: ServerResourceLimits;
   resources?: ServerResources;
@@ -344,6 +344,7 @@ export interface Node {
   updatedAt?: string;
   isSecure?: boolean;
   isLocalNode?: boolean;
+  capabilities?: { virt?: string; kvm?: boolean; incus?: boolean; os?: string; agentVersion?: string };
   reservedRamMB?: number;
   reservedCpuCores?: number;
   reservedDiskGB?: number;

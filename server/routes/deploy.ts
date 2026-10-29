@@ -90,7 +90,7 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   // server-count limit, but the plan price is still taken from the user's credits
   adminProvision?: { adminId: string; adminEmail: string };
   // VPS plans: engine + OS (wizard sends OS as software and engine as version)
-  vpsEngine?: 'docker' | 'lxc';
+  vpsEngine?: 'docker' | 'lxc' | 'vm';
   vpsOs?: string;
 }) {
   const {
@@ -129,15 +129,25 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
 
   // ---- VPS plan: pick engine + OS and make sure the engine exists before any credits are taken
   const isVps = category === 'vps' || plan.productId === 'prod_vps';
-  let vpsEngine: 'docker' | 'lxc' = 'docker';
+  let vpsEngine: 'docker' | 'lxc' | 'vm' = 'docker';
   let vpsOs = 'ubuntu-22.04';
+  let vpsRemoteNode: any = null;
   if (isVps) {
-    vpsEngine = payload.vpsEngine || (/lxc|incus/i.test(String(version || '')) ? 'lxc' : 'docker');
+    vpsEngine = payload.vpsEngine || (/kvm|vm/i.test(String(version || '')) ? 'vm' : /lxc|incus/i.test(String(version || '')) ? 'lxc' : 'docker');
     const wanted = String(payload.vpsOs || software || '').toLowerCase();
     vpsOs = Object.keys(VPS_OS).find((k) => k === wanted || VPS_OS[k].label.toLowerCase() === wanted) || 'ubuntu-22.04';
+    const asked = nodeId ? db.nodes.find((n: any) => n.id === nodeId) : null;
+    if (asked && asked.id !== 'node_local' && !asked.isLocalNode) {
+      vpsRemoteNode = asked; // VPS on a connected node (install.sh -> Make this VPS a node)
+      if (asked.status !== 'online') throw new Error(`Node '${asked.name}' is offline - check on the node: systemctl status aethernode`);
+      if (vpsEngine === 'docker') vpsEngine = 'lxc';
+      if (vpsEngine === 'vm' && asked.capabilities && !asked.capabilities.kvm) throw new Error(`Node '${asked.name}' has no KVM - choose an LXC container.`);
+    }
+  }
+  if (isVps && !vpsRemoteNode) {
     const eng = await detectVpsEngines(true);
     if (vpsEngine === 'docker' && !eng.docker) throw new Error('VPS engine Docker is not installed or not running on the panel machine (curl -fsSL https://get.docker.com | sh).');
-    if (vpsEngine === 'lxc' && !eng.lxc) throw new Error('VPS engine LXC/Incus is not installed on the panel machine (install incus, then: incus admin init --minimal).');
+    if (vpsEngine !== 'docker' && !eng.lxc) throw new Error('VPS engine LXC/Incus is not installed on the panel machine (install incus, then: incus admin init --minimal).');
   }
 
   const resolvedResources = resolveServerResources({
@@ -152,8 +162,8 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   let nodeRejectionReason = '';
 
   if (isVps) {
-    // a VPS always runs on the panel machine itself
-    targetNode = db.nodes.find((n: any) => n.id === 'node_local' || n.isLocalNode) || null;
+    // a VPS runs on the panel machine itself, or on the connected node that was picked
+    targetNode = vpsRemoteNode || db.nodes.find((n: any) => n.id === 'node_local' || n.isLocalNode) || null;
     if (!targetNode) throw new Error('The panel machine (local node) was not found - VPS needs it.');
   } else if (nodeId) {
     targetNode = db.nodes.find((n: any) => n.id === nodeId && n.status === 'online' && !n.isMaintenanceMode);
@@ -163,8 +173,9 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     // No capacity limits: servers are never refused for "insufficient RAM / CPU / disk" or max server count.
     // Pick any online node (allowed for this product first), least loaded first; fall back to the panel's own node.
     const usable = (n: any) => n.status === 'online' && !n.isMaintenanceMode;
-    let candidateNodes = db.nodes.filter((n: any) => usable(n) && (!n.allowedProducts || n.allowedProducts.length === 0 || n.allowedProducts.includes(plan.productId)));
-    if (candidateNodes.length === 0) candidateNodes = db.nodes.filter(usable);
+    const vpsOnly = (n: any) => Array.isArray(n.tags) && n.tags.includes('vps-node');
+    let candidateNodes = db.nodes.filter((n: any) => usable(n) && !vpsOnly(n) && (!n.allowedProducts || n.allowedProducts.length === 0 || n.allowedProducts.includes(plan.productId)));
+    if (candidateNodes.length === 0) candidateNodes = db.nodes.filter((n: any) => usable(n) && !vpsOnly(n));
     if (candidateNodes.length === 0) candidateNodes = db.nodes.filter((n: any) => n.id === 'node_local' || n.isLocalNode);
     if (candidateNodes.length === 0) candidateNodes = db.nodes.slice(0, 1);
     if (candidateNodes.length === 0) {
@@ -257,7 +268,7 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     databases: resolvedResources.databases
   };
 
-  const selectedSoftware = isVps ? `${VPS_OS[vpsOs].label} (${vpsEngine === 'docker' ? 'Docker' : 'LXC'})` : (software || template?.name || (category === 'minecraft' ? 'Paper' : 'Node.js'));
+  const selectedSoftware = isVps ? `${VPS_OS[vpsOs].label} (${vpsEngine === 'docker' ? 'Docker' : vpsEngine === 'vm' ? 'KVM VM' : 'LXC'})` : (software || template?.name || (category === 'minecraft' ? 'Paper' : 'Node.js'));
   const selectedVersion = isVps ? vpsOs : (version || template?.defaultVersion || (category === 'minecraft' ? '1.21.4' : 'Node 22 (LTS)'));
 
   let resolvedServerTypeId = isVps ? 'st_vps' : serverTypeId;
@@ -320,7 +331,7 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     serverTypeId: resolvedServerTypeId,
     deploymentState: 'READY',
     status: isVps ? 'installing' : 'running',
-    ...(isVps ? { vps: buildVpsInfo(serverId, vpsEngine, vpsOs, name) } : {}),
+    ...(isVps ? { vps: buildVpsInfo(serverId, vpsEngine, vpsOs, name, vpsRemoteNode ? vpsRemoteNode.id : undefined) } : {}),
     primaryIp: effectiveIp,
     primaryPort: assignedPort,
     location: targetNode.locationName,

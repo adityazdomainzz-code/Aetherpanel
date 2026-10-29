@@ -1205,8 +1205,11 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
   };
 
   // VPS servers have their own tab set - send anything else to the terminal
-  const VPS_TABS = ['terminal', 'monitoring', 'files', 'importer', 'env', 'backups', 'schedules', 'activity', 'subusers'];
   const serverIsVps = !!server && (server.productId === 'prod_vps' || !!(server as any).vps);
+  const vpsRemote = !!(server as any)?.vps?.remote; // VPS on a connected node: its files live on that node
+  const VPS_TABS = vpsRemote
+    ? ['terminal', 'monitoring', 'schedules', 'activity', 'subusers']
+    : ['terminal', 'monitoring', 'files', 'importer', 'env', 'backups', 'schedules', 'activity', 'subusers'];
   useEffect(() => {
     if (serverIsVps && !VPS_TABS.includes(activeTab)) setActiveTab('terminal');
     if (server && !serverIsVps && activeTab === 'terminal') setActiveTab('console');
@@ -1264,10 +1267,10 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
     if (isVps) {
       if (hasPerm('console.view')) t.push({ id: 'terminal', label: 'Terminal', group: 'manage' });
       if (hasPerm('console.view') || hasPerm('monitoring.view')) t.push({ id: 'monitoring', label: 'Monitoring & Metrics', group: 'manage' });
-      if (hasPerm('files.view')) t.push({ id: 'files', label: 'File Manager', group: 'files' });
-      if (hasPerm('files.create')) t.push({ id: 'importer', label: 'Server Importer', group: 'files' });
-      if (hasPerm('backups.view')) t.push({ id: 'backups', label: 'Backups', group: 'files', count: backups.length });
-      if (hasPerm('startup.update')) t.push({ id: 'env', label: 'Env & Variables', group: 'config' });
+      if (!vpsRemote && hasPerm('files.view')) t.push({ id: 'files', label: 'File Manager', group: 'files' });
+      if (!vpsRemote && hasPerm('files.create')) t.push({ id: 'importer', label: 'Server Importer', group: 'files' });
+      if (!vpsRemote && hasPerm('backups.view')) t.push({ id: 'backups', label: 'Backups', group: 'files', count: backups.length });
+      if (!vpsRemote && hasPerm('startup.update')) t.push({ id: 'env', label: 'Env & Variables', group: 'config' });
       if (hasPerm('schedules.view')) t.push({ id: 'schedules', label: 'Schedules', group: 'config', count: schedules.length });
       if (hasPerm('activity.view')) t.push({ id: 'activity', label: 'Audit Log', group: 'admin' });
       if (canManageSubusers) t.push({ id: 'subusers', label: 'Subusers', group: 'admin' });
@@ -1340,7 +1343,7 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
                   ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
                   : 'bg-zinc-800 text-zinc-300 border-zinc-700'
               }`}>
-                {isVps ? `VPS · ${(server as any).vps?.engine === 'lxc' ? 'LXC' : 'DOCKER'}` : isMinecraft ? 'MINECRAFT' : isPython ? 'PYTHON BOT' : isBun ? 'BUN BOT' : 'NODE.JS BOT'}
+                {isVps ? `VPS · ${(server as any).vps?.engine === 'vm' ? 'KVM' : (server as any).vps?.engine === 'lxc' ? 'LXC' : 'DOCKER'}${vpsRemote ? ' · NODE' : ''}` : isMinecraft ? 'MINECRAFT' : isPython ? 'PYTHON BOT' : isBun ? 'BUN BOT' : 'NODE.JS BOT'}
               </span>
             </div>
             <p className="text-xs text-zinc-400 flex flex-wrap items-center gap-2">
@@ -1466,10 +1469,10 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
                   {isVps ? (<>
                   {hasPerm('console.view') && <option value="terminal">💻 Terminal</option>}
                   {(hasPerm('console.view') || hasPerm('monitoring.view')) && <option value="monitoring">📊 Monitoring & Metrics</option>}
-                  {hasPerm('files.view') && <option value="files">📁 File Manager</option>}
-                  {hasPerm('files.create') && <option value="importer">🚀 Server Importer</option>}
-                  {hasPerm('startup.update') && <option value="env">🔑 Env & Variables</option>}
-                  {hasPerm('backups.view') && <option value="backups">💾 Backups ({backups.length})</option>}
+                  {!vpsRemote && hasPerm('files.view') && <option value="files">📁 File Manager</option>}
+                  {!vpsRemote && hasPerm('files.create') && <option value="importer">🚀 Server Importer</option>}
+                  {!vpsRemote && hasPerm('startup.update') && <option value="env">🔑 Env & Variables</option>}
+                  {!vpsRemote && hasPerm('backups.view') && <option value="backups">💾 Backups ({backups.length})</option>}
                   {hasPerm('schedules.view') && <option value="schedules">⏱️ Schedules ({schedules.length})</option>}
                   {hasPerm('activity.view') && <option value="activity">📋 Audit Log</option>}
                   {canManageSubusers && <option value="subusers">👥 Subusers</option>}

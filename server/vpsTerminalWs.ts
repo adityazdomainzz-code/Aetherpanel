@@ -31,6 +31,20 @@ export function setupVpsTerminalWebSocket(httpServer: HttpServer) {
 
   httpServer.on('upgrade', async (req, socket, head) => {
     const parsed = parseUrl(req.url || '', true);
+
+    // node agent bringing back a shell for a VPS that runs on that node
+    const na = (parsed.pathname || '').match(/^\/api\/v1\/node\/term\/([a-zA-Z0-9_-]+)\/?$/);
+    if (na) {
+      socket.on('error', () => { try { socket.destroy(); } catch {} });
+      const dtoken = String(parsed.query.token || '').trim();
+      const db = await getDb();
+      const node: any = dtoken && db.nodes.find((n: any) => n.daemonToken === dtoken);
+      const srv: any = node && db.servers.find((x: any) => x.id === na[1] && x.vps?.remote && x.vps?.nodeId === node.id);
+      if (!srv) return reject(socket, 403, 'Forbidden');
+      wss.handleUpgrade(req, socket, head, (ws) => getTerminalSession(srv.id).attachAgent(ws));
+      return;
+    }
+
     const m = (parsed.pathname || '').match(/^\/api\/v1\/servers\/([a-zA-Z0-9_-]+)\/ws-terminal\/?$/);
     if (!m) return; // other websocket paths are handled elsewhere
     socket.on('error', () => { try { socket.destroy(); } catch {} });
@@ -61,9 +75,10 @@ export function setupVpsTerminalWebSocket(httpServer: HttpServer) {
     const db = await getDb();
     const server: any = db.servers.find((s) => s.id === serverId);
     const running = server?.status === 'running';
-    send({ t: 's', state: running ? (session.alive ? 'open' : 'ready') : 'offline', status: server?.status });
+    const installing = server?.status === 'installing' || server?.status === 'starting';
+    send({ t: 's', state: running ? (session.alive ? 'open' : 'ready') : installing ? 'installing' : 'offline', status: server?.status });
     if (running && !session.alive) session.start(server.vps);
-    else if (!running && !session.buffer) session.push('\x1b[33mVPS is offline - press Start to boot it.\x1b[0m\r\n');
+    else if (!running && !installing && !session.buffer) session.push('\x1b[33mVPS is offline - press Start to boot it.\x1b[0m\r\n');
 
     let alive = true;
     ws.on('pong', () => { alive = true; });

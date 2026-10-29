@@ -124,7 +124,7 @@ const SOFTWARE_CATALOG: SoftwareOption[] = [
     ['alpine-3.20', 'Alpine 3.20', 'Tiny Alpine Linux (sh, apk) for very small VPS.'],
   ].map(([id, name, description]) => ({
     id, name, category: 'vps' as const, description,
-    defaultVersion: 'Docker', versions: ['Docker', 'LXC'], icon: Terminal,
+    defaultVersion: 'Docker', versions: ['Docker', 'LXC', 'KVM VM'], icon: Terminal,
   }))
 ];
 

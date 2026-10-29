@@ -1206,7 +1206,7 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
           billingCycle: billingCycle === 'yearly' ? 'yearly' : 'monthly',
           paymentMethod: 'balance',
           adminProvision: { adminId: req.user!.id, adminEmail: req.user!.email },
-          vpsEngine: req.body.vpsEngine === 'lxc' ? 'lxc' : req.body.vpsEngine === 'docker' ? 'docker' : undefined,
+          vpsEngine: ['lxc', 'docker', 'vm'].includes(req.body.vpsEngine) ? req.body.vpsEngine : undefined,
           vpsOs: req.body.vpsOs ? String(req.body.vpsOs) : undefined
         });
         const charged = parseFloat((balanceBefore - (targetUser.credits || 0)).toFixed(2));
@@ -1235,23 +1235,36 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
 
   const category = hostingCategory || 'minecraft';
   const isVps = category === 'vps';
-  const vpsEngine: 'docker' | 'lxc' = req.body.vpsEngine === 'lxc' ? 'lxc' : 'docker';
+  const vpsEngine: 'docker' | 'lxc' | 'vm' = req.body.vpsEngine === 'lxc' ? 'lxc' : req.body.vpsEngine === 'vm' ? 'vm' : 'docker';
   const vpsOs = VPS_OS[req.body.vpsOs] ? String(req.body.vpsOs) : 'ubuntu-22.04';
-  if (isVps) {
+  const localNode = db.nodes.find(n => n.id === 'node_local' || n.isLocalNode);
+  const isVpsOnlyNode = (n: any) => Array.isArray(n?.tags) && n.tags.includes('vps-node');
+  // VPS on a connected node (install.sh -> "Make this VPS a node")
+  const remoteVpsNode: any = isVps && nodeId && localNode?.id !== nodeId ? db.nodes.find(n => n.id === nodeId) : null;
+  if (isVps && nodeId && localNode?.id !== nodeId && !remoteVpsNode) {
+    return res.status(404).json({ success: false, error: { code: 'NODE_NOT_FOUND', message: 'That node does not exist.' } });
+  }
+  if (remoteVpsNode) {
+    if (vpsEngine === 'docker') return res.status(400).json({ success: false, error: { code: 'VPS_ENGINE', message: 'Connected nodes run LXC containers or KVM VMs - Docker is only for the panel machine.' } });
+    if (remoteVpsNode.status !== 'online') return res.status(400).json({ success: false, error: { code: 'NODE_OFFLINE', message: `Node '${remoteVpsNode.name}' is offline - check on the node: systemctl status aethernode` } });
+    if (vpsEngine === 'vm' && remoteVpsNode.capabilities && !remoteVpsNode.capabilities.kvm) return res.status(400).json({ success: false, error: { code: 'NO_KVM', message: `Node '${remoteVpsNode.name}' has no KVM - choose LXC container.` } });
+  } else if (isVps) {
     const eng = await detectVpsEngines(true);
     if (vpsEngine === 'docker' && !eng.docker) {
       return res.status(400).json({ success: false, error: { code: 'VPS_ENGINE_MISSING', message: 'Docker is not installed or not running on the panel machine. Install it: curl -fsSL https://get.docker.com | sh' } });
     }
-    if (vpsEngine === 'lxc' && !eng.lxc) {
+    if (vpsEngine !== 'docker' && !eng.lxc) {
       return res.status(400).json({ success: false, error: { code: 'VPS_ENGINE_MISSING', message: 'LXC/Incus is not installed on the panel machine. Install incus and run: incus admin init --minimal' } });
+    }
+    if (vpsEngine === 'vm' && !fs.existsSync('/dev/kvm')) {
+      return res.status(400).json({ success: false, error: { code: 'NO_KVM', message: 'The panel machine has no KVM (/dev/kvm) - choose LXC container.' } });
     }
   }
   // No capacity limits here: any node is fine; fall back to the panel's own node so creation never fails for "no capacity"
-  const localNode = db.nodes.find(n => n.id === 'node_local' || n.isLocalNode);
   const targetNode = isVps
-    ? localNode
+    ? (remoteVpsNode || localNode)
     : (nodeId ? db.nodes.find(n => n.id === nodeId) : null)
-      || db.nodes.find(n => n.status === 'online' && !n.isMaintenanceMode)
+      || db.nodes.find(n => n.status === 'online' && !n.isMaintenanceMode && !isVpsOnlyNode(n))
       || localNode
       || db.nodes[0];
 
@@ -1289,7 +1302,7 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
     alloc.isAssigned = true;
   }
 
-  const resolvedSoftware = isVps ? `${VPS_OS[vpsOs].label} (${vpsEngine === 'docker' ? 'Docker' : 'LXC'})` : (software || (category === 'minecraft' ? 'Paper' : 'Node.js'));
+  const resolvedSoftware = isVps ? `${VPS_OS[vpsOs].label} (${vpsEngine === 'docker' ? 'Docker' : vpsEngine === 'vm' ? 'KVM VM' : 'LXC'})` : (software || (category === 'minecraft' ? 'Paper' : 'Node.js'));
   const resolvedVersion = isVps ? vpsOs : (version || (category === 'minecraft' ? '26.2' : '20.x'));
   let resolvedServerTypeId = isVps ? 'st_vps' : category === 'minecraft' ? 'st_minecraft_java' : (resolvedSoftware.toLowerCase().includes('python') ? 'st_python' : resolvedSoftware.toLowerCase().includes('bun') ? 'st_bun' : 'st_nodejs');
 
@@ -1359,7 +1372,7 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
       cpuPercent: resolvedRes.cpuPercent,
       diskGb: resolvedRes.diskGB
     },
-    ...(isVps ? { vps: buildVpsInfo(serverId, vpsEngine, vpsOs, name) } : {}),
+    ...(isVps ? { vps: buildVpsInfo(serverId, vpsEngine, vpsOs, name, remoteVpsNode ? remoteVpsNode.id : undefined) } : {}),
     isAdminCreated: true, // Crucial: does not count towards user's 1-server allocation limit
     createdByAdmin: true,
     provisionSource: 'admin_assigned',

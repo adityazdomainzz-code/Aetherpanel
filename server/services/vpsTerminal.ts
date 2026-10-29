@@ -3,7 +3,8 @@
 // and coming back shows exactly what was on screen (and the shell keeps running, e.g. after "sudo su").
 import { spawn, ChildProcess, execFileSync } from 'child_process';
 import { StringDecoder } from 'string_decoder';
-import { terminalCommand, VpsInfo } from './vpsService';
+import { terminalCommand, VpsInfo, isRemoteVps } from './vpsService';
+import { fireNodeJob } from './nodeJobs';
 
 const MAX_BUFFER = 256 * 1024; // characters kept for replay
 
@@ -88,8 +89,26 @@ class TerminalSession {
 
   state(s: string) { for (const l of this.listeners) l({ t: 's', state: s }); }
 
+  agent: any = null;        // remote node agent websocket (VPS on a connected node)
+  private agentWait: NodeJS.Timeout | null = null;
+
   start(v: VpsInfo) {
     if (this.alive) return;
+    if (isRemoteVps(v)) {
+      // ask the node to open a shell and connect it back to /api/v1/node/term/<serverId>
+      this.alive = true;
+      this.child = null;
+      fireNodeJob(v.nodeId!, 'term-open', { serverId: this.serverId, instanceName: v.instanceName, engine: v.engine, cols: this.cols, rows: this.rows });
+      if (this.agentWait) clearTimeout(this.agentWait);
+      this.agentWait = setTimeout(() => {
+        if (!this.agent) {
+          this.alive = false;
+          this.push('\r\n\x1b[31m[the node did not open a shell - is it online? check on the node: systemctl status aethernode]\x1b[0m\r\n');
+          this.state('closed');
+        }
+      }, 25000);
+      return;
+    }
     const cmd = terminalCommand(v);
     const py = findPython();
     const env = { ...process.env, TERM: 'xterm-256color', AE_COLS: String(this.cols), AE_ROWS: String(this.rows) };
@@ -113,17 +132,45 @@ class TerminalSession {
   }
 
   write(data: string) {
+    if (this.agent && this.alive) { try { this.agent.send(JSON.stringify({ t: 'i', d: data })); } catch {} return; }
     if (this.child && this.alive) { try { this.child.stdin!.write(data); } catch {} }
+  }
+
+  /** a node agent connected its shell for this VPS */
+  attachAgent(ws: any) {
+    if (this.agent) { try { this.agent.close(); } catch {} }
+    if (this.agentWait) { clearTimeout(this.agentWait); this.agentWait = null; }
+    this.agent = ws;
+    this.alive = true;
+    this.decoder = new StringDecoder('utf8');
+    ws.on('message', (data: any, isBinary: boolean) => {
+      if (this.agent !== ws) return;
+      if (isBinary) { this.push(this.decoder.write(Buffer.from(data))); return; }
+      let m: any; try { m = JSON.parse(data.toString()); } catch { return; }
+      if (m.t === 'o' && typeof m.d === 'string') this.push(m.d);
+    });
+    ws.on('close', () => {
+      if (this.agent !== ws) return;
+      this.agent = null;
+      this.alive = false;
+      this.push('\r\n\x1b[33m[shell closed - press Enter to open a new one]\x1b[0m\r\n');
+      this.state('closed');
+    });
+    try { ws.send(JSON.stringify({ t: 'r', c: this.cols, r: this.rows })); } catch {}
+    this.state('open');
   }
 
   resize(cols: number, rows: number) {
     this.cols = Math.max(20, Math.min(500, cols | 0));
     this.rows = Math.max(5, Math.min(200, rows | 0));
+    if (this.agent) { try { this.agent.send(JSON.stringify({ t: 'r', c: this.cols, r: this.rows })); } catch {} return; }
     const ctl: any = this.child?.stdio?.[3];
     if (ctl && this.alive) { try { ctl.write(`R ${this.cols} ${this.rows}\n`); } catch {} }
   }
 
   close(reason?: string) {
+    if (this.agent) { const a = this.agent; this.agent = null; try { a.close(); } catch {} }
+    if (this.agentWait) { clearTimeout(this.agentWait); this.agentWait = null; }
     const c = this.child;
     this.child = null;
     this.alive = false;

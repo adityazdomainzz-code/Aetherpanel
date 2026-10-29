@@ -4,7 +4,110 @@ import { getDb, saveDbSync } from '../db';
 import { getInstallationId } from '../installation';
 import { appendConsoleLog, emitServerStatus, pullRemoteServerCommands, handleNodeReconnect } from '../provider';
 
+import fs from 'fs';
+import path from 'path';
+import { takeNodeJobs, resolveNodeJob, serverOfJob, requeueNodeJobs } from '../services/nodeJobs';
+import { applyRemoteVpsStates, nodeProgress } from '../services/vpsService';
+
 const router = Router();
+
+// ---------- "Connect another node" (install.sh on the panel machine) ----------
+// install.sh reads this key from disk, so only root on the panel machine can create node connect URLs.
+const LOCAL_KEY_FILE = path.join(process.cwd(), 'data', '.node-local-key');
+function localKey(): string {
+  try {
+    if (!fs.existsSync(LOCAL_KEY_FILE)) {
+      fs.mkdirSync(path.dirname(LOCAL_KEY_FILE), { recursive: true });
+      fs.writeFileSync(LOCAL_KEY_FILE, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
+    }
+    return fs.readFileSync(LOCAL_KEY_FILE, 'utf8').trim();
+  } catch { return ''; }
+}
+localKey();
+
+const isLoopback = (req: Request) => /^(::1|127\.\d+\.\d+\.\d+|::ffff:127\.\d+\.\d+\.\d+)$/.test(String(req.socket.remoteAddress || ''));
+
+function daemonNode(db: any, req: Request) {
+  const raw = (req.headers['x-daemon-token'] || req.headers['authorization'] || (req.query.token as string) || '').toString();
+  const t = raw.replace(/^Bearer\s+/i, '').trim();
+  return t ? db.nodes.find((n: any) => n.daemonToken === t) : null;
+}
+
+// POST /api/v1/node/local/create-connect  {name, panelUrl}  -> node + one-time connect URL
+router.post('/local/create-connect', async (req: Request, res: Response) => {
+  const key = localKey();
+  if (!isLoopback(req) || !key || req.headers['x-local-key'] !== key) {
+    return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Run this from install.sh on the panel machine.' } });
+  }
+  const name = String(req.body?.name || '').trim().slice(0, 40);
+  const panelUrl = String(req.body?.panelUrl || '').trim().replace(/\/+$/, '');
+  if (!name) return res.status(400).json({ success: false, error: { code: 'NAME_REQUIRED', message: 'Node name is required.' } });
+  if (!/^https?:\/\/[^\s]+$/.test(panelUrl)) return res.status(400).json({ success: false, error: { code: 'BAD_URL', message: 'Panel URL must start with http:// or https://' } });
+
+  const db = await getDb();
+  const nodeId = `node_${Date.now()}`;
+  db.nodes.push({
+    id: nodeId, name, hostname: name.toLowerCase().replace(/[^a-z0-9-]+/g, '-'), ip: '0.0.0.0', fqdn: '',
+    daemonPort: 8080, sftpPort: 2022, location: 'remote', locationName: name,
+    totalRamMB: 0, usedRamMB: 0, totalCpuCores: 0, usedCpuCores: 0, totalDiskGB: 0, usedDiskGB: 0,
+    ramOverallocatePercent: 0, cpuOverallocatePercent: 0, diskOverallocatePercent: 0, maxServers: 0,
+    allowedProducts: ['prod_vps'], tags: ['vps-node'], status: 'offline', isMaintenanceMode: false, serverCount: 0,
+    isLocalNode: false,
+  } as any);
+  const token = `ntok_${crypto.randomBytes(24).toString('hex')}`;
+  db.nodeInstallTokens.push({ id: `tok_${Date.now()}`, nodeId, token, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 24 * 3600000).toISOString(), isUsed: false } as any);
+  saveDbSync();
+  return res.json({ success: true, data: { nodeId, name, connectUrl: `${panelUrl}/api/v1/node/join/${token}`, expiresInHours: 24 } });
+});
+
+// GET /api/v1/node/join/:token - what a connect URL points to (agent install uses enroll)
+router.get('/join/:token', async (req: Request, res: Response) => {
+  const db = await getDb();
+  const t = db.nodeInstallTokens.find((x: any) => x.token === req.params.token);
+  const ok = !!t && !t.isUsed && new Date(t.expiresAt) > new Date();
+  res.json({ success: ok, data: ok ? { nodeName: db.nodes.find((n: any) => n.id === t!.nodeId)?.name, message: 'Paste this URL into install.sh -> "Make this VPS a node" on the new server.' } : undefined,
+    error: ok ? undefined : { code: 'INVALID_TOKEN', message: 'This connect URL is invalid, expired or already used. Create a new one on the panel machine.' } });
+});
+
+// GET /api/v1/node/agent.js - the node agent (always the same version as this panel)
+router.get('/agent.js', (req: Request, res: Response) => {
+  const f = path.join(process.cwd(), 'node-agent', 'agent.js');
+  if (!fs.existsSync(f)) return res.status(404).type('text/plain').send('node-agent/agent.js missing on the panel - update the panel');
+  res.type('application/javascript').send(fs.readFileSync(f, 'utf8'));
+});
+
+// GET /api/v1/node/jobs?wait=20 - agent long-poll for work
+router.get('/jobs', async (req: Request, res: Response) => {
+  const db = await getDb();
+  const node = daemonNode(db, req);
+  if (!node) return res.status(401).json({ success: false, error: { code: 'INVALID_DAEMON_TOKEN', message: 'Unknown daemon token' } });
+  node.lastHeartbeatAt = new Date().toISOString();
+  if (node.status === 'offline') node.status = 'online';
+  const wait = Math.min(25, Math.max(0, parseInt(String(req.query.wait || '20'), 10) || 0)) * 1000;
+  let closed = false;
+  req.on('close', () => { closed = true; });
+  const jobs = await takeNodeJobs(node.id, wait);
+  if (closed) { requeueNodeJobs(node.id, jobs); return; } // agent went away while waiting - keep the jobs for its next poll
+  res.json({ success: true, data: jobs.map((j) => ({ id: j.id, action: j.action, payload: j.payload })) });
+});
+
+// POST /api/v1/node/jobs/:id/result  {ok, output, error, data}
+router.post('/jobs/:id/result', async (req: Request, res: Response) => {
+  const db = await getDb();
+  if (!daemonNode(db, req)) return res.status(401).json({ success: false });
+  const b = req.body || {};
+  resolveNodeJob(req.params.id, { ok: !!b.ok, output: typeof b.output === 'string' ? b.output.slice(-200000) : undefined, error: b.error ? String(b.error).slice(0, 2000) : undefined, data: b.data });
+  res.json({ success: true });
+});
+
+// POST /api/v1/node/jobs/:id/log  {line} - progress shown in the VPS terminal
+router.post('/jobs/:id/log', async (req: Request, res: Response) => {
+  const db = await getDb();
+  if (!daemonNode(db, req)) return res.status(401).json({ success: false });
+  const sid = serverOfJob(req.params.id);
+  if (sid && req.body?.line) nodeProgress(sid, String(req.body.line).slice(0, 500));
+  res.json({ success: true });
+});
 
 // POST /api/v1/node/enroll - Daemon uses one-time installation token to pair with Panel
 router.post('/enroll', async (req: Request, res: Response) => {
@@ -49,6 +152,14 @@ router.post('/enroll', async (req: Request, res: Response) => {
   // Generate permanent daemon token
   const daemonToken = `dtoken_${crypto.randomBytes(24).toString('hex')}`;
   node.daemonToken = daemonToken;
+  if (req.body.capabilities && typeof req.body.capabilities === 'object') {
+    const c = req.body.capabilities;
+    (node as any).capabilities = { virt: String(c.virt || ''), kvm: !!c.kvm, incus: !!c.incus, os: String(c.os || ''), agentVersion: String(c.agentVersion || '') };
+    if (c.hostname) node.hostname = String(c.hostname).slice(0, 63);
+  }
+  if (typeof req.body.totalRamMB === 'number') node.totalRamMB = req.body.totalRamMB;
+  if (typeof req.body.totalCpuCores === 'number') node.totalCpuCores = req.body.totalCpuCores;
+  if (typeof req.body.totalDiskGB === 'number') node.totalDiskGB = req.body.totalDiskGB;
   if (fqdn) node.fqdn = fqdn;
   if (ip) node.ip = ip;
   if (daemonPort) node.daemonPort = parseInt(daemonPort) || 8080;
@@ -118,6 +229,13 @@ router.post('/heartbeat', async (req: Request, res: Response) => {
   if (typeof activeContainers === 'number') node.serverCount = activeContainers;
   if (typeof totalRamMB === 'number' && totalRamMB > 0) node.totalRamMB = totalRamMB;
   if (typeof totalDiskGB === 'number' && totalDiskGB > 0) node.totalDiskGB = totalDiskGB;
+
+  if (typeof req.body.totalCpuCores === 'number' && req.body.totalCpuCores > 0) node.totalCpuCores = req.body.totalCpuCores;
+  // VPS instances on this node (LXC containers / KVM VMs run by node-agent)
+  if (Array.isArray(req.body.vpsStates)) {
+    applyRemoteVpsStates(node.id, db.servers, req.body.vpsStates);
+    node.serverCount = db.servers.filter((x: any) => x.nodeId === node.id).length;
+  }
 
   // If node reports actual status for its running server containers
   if (Array.isArray(serverStatuses)) {

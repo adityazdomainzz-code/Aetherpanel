@@ -10,7 +10,7 @@ interface Props {
   canType: boolean;
 }
 
-type ConnState = 'connecting' | 'open' | 'ready' | 'closed' | 'offline' | 'disconnected';
+type ConnState = 'connecting' | 'open' | 'ready' | 'closed' | 'offline' | 'installing' | 'disconnected';
 
 /**
  * VPS web terminal. The shell runs on the panel side and keeps going while nobody looks;
@@ -141,6 +141,7 @@ export const ServerTerminalTab: React.FC<Props> = ({ server, canType }) => {
     ready: ['Opening shell…', 'text-amber-400 bg-amber-500/10 border-amber-500/20'],
     closed: ['Shell closed · press Enter', 'text-zinc-300 bg-zinc-800 border-zinc-700'],
     offline: ['VPS offline', 'text-red-400 bg-red-500/10 border-red-500/20'],
+    installing: ['Creating VPS…', 'text-amber-400 bg-amber-500/10 border-amber-500/20'],
     disconnected: ['Reconnecting…', 'text-amber-400 bg-amber-500/10 border-amber-500/20'],
   };
   const [label, cls] = badge[conn] || badge.connecting;
@@ -177,7 +178,8 @@ export const ServerTerminalTab: React.FC<Props> = ({ server, canType }) => {
       </div>
       {!full && (
         <p className="text-[11px] text-zinc-500">
-          The shell keeps running when you leave this page - come back and everything is still here. Files in <code className="text-zinc-300">/root</code> are the same as in the File Manager.
+          The shell keeps running when you leave this page - come back and everything is still here.{' '}
+          {(server as any).vps?.remote ? 'This VPS runs on a connected node.' : <>Files in <code className="text-zinc-300">/root</code> are the same as in the File Manager.</>}
         </p>
       )}
     </div>

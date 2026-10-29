@@ -28,7 +28,9 @@ export const AdminServers: React.FC = () => {
   const [createEmail, setCreateEmail] = useState('');
   const [createServerName, setCreateServerName] = useState('Custom Server');
   const [createCategory, setCreateCategory] = useState<'minecraft' | 'bot' | 'vps'>('minecraft');
-  const [vpsEngine, setVpsEngine] = useState<'docker' | 'lxc'>('docker');
+  const [vpsEngine, setVpsEngine] = useState<'docker' | 'lxc' | 'vm'>('docker');
+  const [vpsNodeId, setVpsNodeId] = useState('');
+  const [allNodes, setAllNodes] = useState<any[]>([]);
   const [vpsOs, setVpsOs] = useState('ubuntu-22.04');
   const [createSoftware, setCreateSoftware] = useState('Paper');
   const [createVersion, setCreateVersion] = useState('26.2');
@@ -52,7 +54,8 @@ export const AdminServers: React.FC = () => {
   const [createCycle, setCreateCycle] = useState<'monthly' | 'yearly'>('monthly');
 
   const loadCreateData = async () => {
-    const [u, p, pr] = await Promise.all([apiRequest('/admin/users'), apiRequest('/admin/plans'), apiRequest('/admin/products')]);
+    const [u, p, pr, nd] = await Promise.all([apiRequest('/admin/users'), apiRequest('/admin/plans'), apiRequest('/admin/products'), apiRequest('/admin/nodes')]);
+    if (nd.success && Array.isArray(nd.data)) setAllNodes(nd.data);
     if (u.success && u.data) setAllUsers(u.data);
     if (p.success && p.data) setAllPlans(p.data);
     if (pr.success && pr.data) setAllProducts(pr.data);
@@ -141,7 +144,7 @@ export const AdminServers: React.FC = () => {
         hostingCategory: createCategory,
         software: createSoftware,
         version: createVersion,
-        ...(createCategory === 'vps' ? { vpsEngine, vpsOs } : {}),
+        ...(createCategory === 'vps' ? { vpsEngine, vpsOs, ...(vpsNodeId ? { nodeId: vpsNodeId } : {}) } : {}),
         ...(createMode === 'plan'
           ? { planId: selectedPlan.id, billingCycle: createCycle }
           : { ramMB: createRam, cpuCores: createCpu, diskGB: createDisk })
@@ -801,11 +804,12 @@ export const AdminServers: React.FC = () => {
                   {createCategory === 'vps' ? (
                     <select
                       value={vpsEngine}
-                      onChange={(e) => setVpsEngine(e.target.value as 'docker' | 'lxc')}
+                      onChange={(e) => setVpsEngine(e.target.value as 'docker' | 'lxc' | 'vm')}
                       className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
                     >
-                      <option value="docker">Docker container</option>
+                      {!vpsNodeId && <option value="docker">Docker container</option>}
                       <option value="lxc">LXC / Incus container</option>
+                      <option value="vm">KVM virtual machine</option>
                     </select>
                   ) : (
                   <select
@@ -846,6 +850,19 @@ export const AdminServers: React.FC = () => {
 
               {createCategory === 'vps' ? (
               <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1">Node</label>
+                <select
+                  value={vpsNodeId}
+                  onChange={(e) => { setVpsNodeId(e.target.value); if (e.target.value && vpsEngine === 'docker') setVpsEngine('lxc'); }}
+                  className="w-full mb-3 bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
+                >
+                  <option value="">This panel machine</option>
+                  {allNodes.filter((n) => Array.isArray(n.tags) && n.tags.includes('vps-node')).map((n) => (
+                    <option key={n.id} value={n.id} disabled={n.status !== 'online'}>
+                      {n.name} - {n.status === 'online' ? 'online' : 'offline'}{n.capabilities?.kvm ? ' · KVM' : ''}{n.totalRamMB ? ` · ${Math.round(n.totalRamMB / 1024)} GB RAM` : ''}
+                    </option>
+                  ))}
+                </select>
                 <label className="block text-xs font-medium text-zinc-300 mb-1">Operating System *</label>
                 <select
                   value={vpsOs}
@@ -858,7 +875,9 @@ export const AdminServers: React.FC = () => {
                   <option value="alpine-3.20">Alpine 3.20</option>
                 </select>
                 <p className="text-[10px] text-zinc-500 mt-1">
-                  Runs on this panel machine - {vpsEngine === 'docker' ? 'Docker must be installed (curl -fsSL https://get.docker.com | sh).' : 'Incus/LXC must be installed and initialised (incus admin init --minimal).'} The VPS /root folder is the File Manager.
+                  {vpsNodeId
+                    ? 'Runs on the connected node (Incus). Add nodes with install.sh -> "Connect another Node" on the panel machine.'
+                    : <>Runs on this panel machine - {vpsEngine === 'docker' ? 'Docker must be installed (curl -fsSL https://get.docker.com | sh).' : 'Incus/LXC must be installed and initialised (incus admin init --minimal).'} The VPS /root folder is the File Manager.</>}
                 </p>
               </div>
               ) : (
