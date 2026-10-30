@@ -146,7 +146,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onSelectServer
             ${user?.credits?.toFixed(2) || '0.00'}
           </div>
           <button onClick={() => onNavigate('billing')} className="text-[10px] font-mono font-bold text-violet-400 hover:text-violet-300 transition-colors uppercase tracking-wider cursor-pointer">
-            + Add Credits
+            {policy.selfFunding ? '+ Add Credits' : 'View Billing'}
           </button>
         </div>
 

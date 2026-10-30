@@ -92,6 +92,8 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   // VPS plans: engine + OS (wizard sends OS as software and engine as version)
   vpsEngine?: 'docker' | 'lxc' | 'vm';
   vpsOs?: string;
+  // category the user picked in the wizard - the plan must belong to it
+  productCategory?: string;
 }) {
   const {
     name, planId, templateId, nodeId, location, software, version,
@@ -126,6 +128,11 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
 
   const prod = db.products.find((p: any) => p.id === plan.productId);
   const category = template?.category || prod?.category || (plan.id.includes('bot') ? 'bot' : 'minecraft');
+  const wantCat = String(payload.productCategory || '').toLowerCase();
+  if (wantCat && ['minecraft', 'bot', 'vps'].includes(wantCat) && wantCat !== category) {
+    const nice = (c: string) => (c === 'vps' ? 'VPS' : c === 'bot' ? 'Bot Hosting' : 'Minecraft');
+    throw new Error(`The plan '${plan.name}' is a ${nice(category)} plan, not ${nice(wantCat)}. Pick a ${nice(wantCat)} plan (Admin -> Products & Plans).`);
+  }
 
   // ---- VPS plan: pick engine + OS and make sure the engine exists before any credits are taken
   const isVps = category === 'vps' || plan.productId === 'prod_vps';

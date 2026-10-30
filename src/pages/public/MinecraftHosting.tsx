@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Gamepad2, CheckCircle2, Shield, Cpu, Zap, ArrowRight, Sparkles } from 'lucide-react';
 import { useTheme } from '../../lib/ThemeContext';
 import { apiRequest } from '../../lib/api';
+import { useAuth } from '../../lib/AuthContext';
+import { usePolicy, canDeploy } from '../../lib/policy';
 import { Plan } from '../../types';
 
 interface MinecraftHostingProps {
@@ -10,6 +12,10 @@ interface MinecraftHostingProps {
 
 export const MinecraftHosting: React.FC<MinecraftHostingProps> = ({ onNavigate }) => {
   const { accentClasses } = useTheme();
+  const { user: authUser } = useAuth();
+  const deployPolicy = usePolicy();
+  // only admins deploy - everybody else asks support (logged out: register first)
+  const deployOk = canDeploy(authUser, deployPolicy);
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
@@ -130,14 +136,14 @@ export const MinecraftHosting: React.FC<MinecraftHostingProps> = ({ onNavigate }
                   </div>
 
                   <button
-                    onClick={() => onNavigate('deploy', { planId: p.id, productCategory: 'minecraft' })}
+                    onClick={() => (deployOk ? onNavigate('deploy', { planId: p.id, productCategory: 'minecraft' }) : onNavigate(authUser ? 'support' : 'register'))}
                     className={`w-full mt-6 py-3 rounded-xl font-semibold text-xs transition-all flex items-center justify-center gap-2 ${
                       p.isPopular
                         ? `bg-gradient-to-r ${accentClasses.gradient} text-white shadow-md hover:opacity-95`
                         : 'bg-zinc-800 text-white hover:bg-zinc-700'
                     }`}
                   >
-                    <span>Deploy {p.name}</span>
+                    <span>{deployOk ? `Deploy ${p.name}` : authUser ? 'Request this plan' : 'Get Started'}</span>
                     <ArrowRight className="h-3.5 w-3.5" />
                   </button>
                 </div>

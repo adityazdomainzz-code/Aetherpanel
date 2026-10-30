@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Gamepad2, Bot, Check, ArrowRight, ShieldCheck, Sparkles, Server } from 'lucide-react';
 import { useTheme } from '../../lib/ThemeContext';
 import { apiRequest } from '../../lib/api';
+import { useAuth } from '../../lib/AuthContext';
+import { usePolicy, canDeploy } from '../../lib/policy';
 import { Plan } from '../../types';
 
 interface PricingProps {
@@ -10,6 +12,10 @@ interface PricingProps {
 
 export const Pricing: React.FC<PricingProps> = ({ onNavigate }) => {
   const { accentClasses } = useTheme();
+  const { user: authUser } = useAuth();
+  const deployPolicy = usePolicy();
+  // only admins deploy - everybody else asks support (logged out: register first)
+  const deployOk = canDeploy(authUser, deployPolicy);
   const [activeCategory, setActiveCategory] = useState<'minecraft' | 'bot' | 'vps'>('minecraft');
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -159,14 +165,14 @@ export const Pricing: React.FC<PricingProps> = ({ onNavigate }) => {
                 </div>
 
                 <button
-                  onClick={() => onNavigate('deploy', { planId: p.id, productCategory: activeCategory })}
+                  onClick={() => (deployOk ? onNavigate('deploy', { planId: p.id, productCategory: activeCategory }) : onNavigate(authUser ? 'support' : 'register'))}
                   className={`w-full mt-6 py-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 transition-all ${
                     p.isPopular
                       ? `bg-gradient-to-r ${accentClasses.gradient} text-white shadow-md hover:opacity-95`
                       : 'bg-zinc-800 text-white hover:bg-zinc-700'
                   }`}
                 >
-                  <span>Deploy Now</span>
+                  <span>{deployOk ? 'Deploy Now' : authUser ? 'Request this plan' : 'Get Started'}</span>
                   <ArrowRight className="h-4 w-4" />
                 </button>
               </div>

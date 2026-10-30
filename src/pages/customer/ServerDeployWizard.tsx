@@ -363,9 +363,7 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
     setServerName(category === 'minecraft' ? 'Minecraft Server' : category === 'vps' ? 'My VPS' : 'Discord Bot Server');
 
     const matchingPlan = plans.find(p => p.productId === prodOf(category));
-    if (matchingPlan) {
-      setSelectedPlanId(matchingPlan.id);
-    }
+    setSelectedPlanId(matchingPlan ? matchingPlan.id : '');
   };
 
   const handleApplyCoupon = async () => {
@@ -404,7 +402,8 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
     return prod.category === selectedProductCategory;
   });
 
-  const selectedPlan = plans.find(p => p.id === selectedPlanId) || currentProductPlans[0] || plans[0];
+  // only plans of the chosen category - never fall back to a plan of another category (VPS -> Minecraft bug)
+  const selectedPlan: Plan | undefined = currentProductPlans.find(p => p.id === selectedPlanId) || currentProductPlans[0];
 
   const calculateTotalPrice = () => {
     if (!selectedPlan) return 0;
@@ -420,6 +419,11 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
   };
 
   const startDeploymentPipeline = async () => {
+    if (!selectedPlan) {
+      const label = selectedProductCategory === 'vps' ? 'VPS' : selectedProductCategory === 'bot' ? 'Bot Hosting' : 'Minecraft';
+      setDeployError(`There is no ${label} plan yet - create one in Admin -> Products & Plans (category ${label} Hosting).`);
+      return;
+    }
     setIsDeploying(true);
     setPipelineStage(1);
     setPipelineLogs(['[Provisioner] Initializing hardware resource bounds...']);
@@ -442,7 +446,8 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
     try {
       const payload = {
         name: serverName.trim() || `${selectedSoftware.name} Server`,
-        planId: selectedPlan?.id || selectedPlanId,
+        planId: selectedPlan?.id,
+        productCategory: selectedProductCategory,
         nodeId: selectedNodeId === 'auto' ? undefined : selectedNodeId,
         location: selectedLocation === 'auto' ? undefined : selectedLocation,
         serverTypeId: selectedServerTypeId,
@@ -796,13 +801,20 @@ export const ServerDeployWizard: React.FC<ServerDeployWizardProps> = ({
         <div className="space-y-6 animate-in fade-in">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-zinc-300">
-              Select Performance Plan Tier ({selectedProductCategory === 'minecraft' ? 'Minecraft' : 'Bot Hosting'})
+              Select Performance Plan Tier ({selectedProductCategory === 'minecraft' ? 'Minecraft' : selectedProductCategory === 'vps' ? 'VPS' : 'Bot Hosting'})
             </h2>
             <span className="text-xs text-zinc-500 font-mono">
               {currentProductPlans.length} Available Tiers
             </span>
           </div>
 
+          {currentProductPlans.length === 0 && (
+            <div className="p-5 rounded-2xl border border-amber-500/30 bg-amber-500/5 text-xs text-amber-300">
+              No {selectedProductCategory === 'vps' ? 'VPS' : selectedProductCategory === 'bot' ? 'Bot Hosting' : 'Minecraft'} plans exist yet.
+              Create one in <b>Admin → Products &amp; Plans</b> (Create New Plan → category {selectedProductCategory === 'vps' ? 'VPS Hosting' : selectedProductCategory === 'bot' ? 'Discord Bot Hosting' : 'Minecraft Hosting'}),
+              or create the server in <b>Admin → All Servers → Create</b> with custom specs.
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {currentProductPlans.map(plan => {
               const isSelected = selectedPlan?.id === plan.id;

@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Bot, CheckCircle2, Terminal, Cpu, Zap, ArrowRight } from 'lucide-react';
 import { useTheme } from '../../lib/ThemeContext';
 import { apiRequest } from '../../lib/api';
+import { useAuth } from '../../lib/AuthContext';
+import { usePolicy, canDeploy } from '../../lib/policy';
 import { Plan } from '../../types';
 
 interface BotHostingProps {
@@ -10,6 +12,10 @@ interface BotHostingProps {
 
 export const BotHosting: React.FC<BotHostingProps> = ({ onNavigate }) => {
   const { accentClasses } = useTheme();
+  const { user: authUser } = useAuth();
+  const deployPolicy = usePolicy();
+  // only admins deploy - everybody else asks support (logged out: register first)
+  const deployOk = canDeploy(authUser, deployPolicy);
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
@@ -130,10 +136,10 @@ export const BotHosting: React.FC<BotHostingProps> = ({ onNavigate }) => {
                   </div>
 
                   <button
-                    onClick={() => onNavigate('deploy', { planId: p.id, productCategory: 'bot' })}
+                    onClick={() => (deployOk ? onNavigate('deploy', { planId: p.id, productCategory: 'bot' }) : onNavigate(authUser ? 'support' : 'register'))}
                     className="w-full mt-8 py-3.5 rounded-xl font-semibold text-xs bg-cyan-600 hover:bg-cyan-500 text-white transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20"
                   >
-                    <span>Deploy {p.name}</span>
+                    <span>{deployOk ? `Deploy ${p.name}` : authUser ? 'Request this plan' : 'Get Started'}</span>
                     <ArrowRight className="h-4 w-4" />
                   </button>
                 </div>
