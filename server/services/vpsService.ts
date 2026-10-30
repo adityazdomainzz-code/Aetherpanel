@@ -217,7 +217,7 @@ async function createInstance(server: Server, v: VpsInfo) {
     if (local) sources.unshift(local);
     let r: RunResult = { code: 1, stdout: '', stderr: 'no image source' };
     for (const img of [...new Set(sources)]) {
-      const base = ['launch', img, v.instanceName, ...(v.engine === 'vm' ? ['--vm'] : []), '-c', `limits.memory=${ram}MiB`, '-c', `limits.cpu=${Math.max(1, Math.ceil(cpus))}`,
+      const base = [v.engine === 'vm' ? 'init' : 'launch', img, v.instanceName, ...(v.engine === 'vm' ? ['--vm'] : []), '-c', `limits.memory=${ram}MiB`, '-c', `limits.cpu=${Math.max(1, Math.ceil(cpus))}`,
         ...(v.engine === 'vm' ? [] : ['-c', 'security.nesting=true']), '-c', 'boot.autostart=true'];
       r = await withHeartbeat(server.id, img.startsWith('aether/') ? `Creating the ${v.engine === 'vm' ? 'VM' : 'container'} from ${img}` : `Downloading ${img} and creating the container (first time takes a few minutes)`, run(cli, [...base, '-d', `root,size=${disk}GiB`], img.startsWith('aether/') ? 12 * 60000 : 25 * 60000));
       if (r.code !== 0 && /size|device|root|pool|quota/i.test(r.stderr + r.stdout)) {
@@ -237,8 +237,19 @@ async function createInstance(server: Server, v: VpsInfo) {
     let m = await run(cli, ['config', 'device', 'add', v.instanceName, 'aetherroot', 'disk', `source=${dir}`, 'path=/root', 'shift=true'], 60000);
     if (m.code !== 0) m = await run(cli, ['config', 'device', 'add', v.instanceName, 'aetherroot', 'disk', `source=${dir}`, 'path=/root'], 60000);
     if (m.code !== 0) await log(server.id, `[AetherVPS/WARN]: Could not mount the file manager folder into /root: ${m.stderr.trim()}`);
+    if (v.engine === 'vm') {
+      await log(server.id, `[AetherVPS]: Starting the VM (first boot takes 1-2 minutes)...`);
+      let st = await run(cli, ['start', v.instanceName], 5 * 60000);
+      if (st.code !== 0 && m.code === 0) {
+        // the share can stop a VM from booting on some hosts - boot without it
+        await log(server.id, `[AetherVPS/WARN]: VM did not start with the /root share (${st.stderr.trim().split('\n').pop()}) - starting without it`);
+        await run(cli, ['config', 'device', 'remove', v.instanceName, 'aetherroot'], 60000);
+        st = await run(cli, ['start', v.instanceName], 5 * 60000);
+      }
+      if (st.code !== 0) throw new Error(`KVM VM start failed: ${st.stderr.trim().split('\n').slice(-2).join(' ')}`);
+    }
     // wait for the instance to come up
-    for (let i = 0; i < (v.engine === 'vm' ? 120 : 30); i++) { if ((await run(cli, ['exec', v.instanceName, '--', 'true'], 10000)).code === 0) break; await new Promise((r2) => setTimeout(r2, 1000)); }
+    for (let i = 0; i < (v.engine === 'vm' ? 180 : 30); i++) { if ((await run(cli, ['exec', v.instanceName, '--', 'true'], 10000)).code === 0) break; await new Promise((r2) => setTimeout(r2, 1000)); }
   }
   await execInVps(v, SETUP_SCRIPT, 60000).catch(() => {});
   v.createdAt = new Date().toISOString();
