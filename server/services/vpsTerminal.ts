@@ -90,6 +90,7 @@ class TerminalSession {
   state(s: string) { for (const l of this.listeners) l({ t: 's', state: s }); }
 
   agent: any = null;        // remote node agent websocket (VPS on a connected node)
+  private bootRetries = 0;  // KVM: shell opened before the VM agent was up -> retry quietly
   private agentWait: NodeJS.Timeout | null = null;
 
   start(v: VpsInfo) {
@@ -118,13 +119,30 @@ class TerminalSession {
     this.child = child;
     this.alive = true;
     this.decoder = new StringDecoder('utf8');
-    child.stdout!.on('data', (b: Buffer) => this.push(this.decoder.write(b)));
-    child.stderr!.on('data', (b: Buffer) => this.push(this.decoder.write(b)));
+    const startedAt = Date.now();
+    let early = '';
+    const out = (b: Buffer) => {
+      const t = this.decoder.write(b);
+      if (v.engine === 'vm' && Date.now() - startedAt < 15000 && early.length < 2000) {
+        early += t;
+        if (/VM agent isn't currently running/i.test(early)) return; // hidden - we retry below
+      }
+      this.push(t);
+    };
+    child.stdout!.on('data', out);
+    child.stderr!.on('data', out);
     child.on('error', (e) => this.push(`\r\n\x1b[31m[terminal error] ${e.message}\x1b[0m\r\n`));
     child.on('close', () => {
       if (this.child !== child) return;
       this.alive = false;
       this.child = null;
+      if (/VM agent isn't currently running/i.test(early) && this.bootRetries < 40) {
+        if (this.bootRetries++ === 0) this.push('\r\n\x1b[36m[AetherVPS]: VM is still booting - the shell opens automatically in a moment...\x1b[0m\r\n');
+        this.state('ready');
+        setTimeout(() => { if (!this.alive && this.listeners.size) this.start(v); }, 5000);
+        return;
+      }
+      this.bootRetries = 0;
       this.push(this.decoder.end() + '\r\n\x1b[33m[shell closed - press Enter to open a new one]\x1b[0m\r\n');
       this.state('closed');
     });
