@@ -8,7 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const { execFile, spawn, execFileSync } = require('child_process');
 
-const VERSION = '2.2.0';
+const VERSION = '2.2.1';
 const CFG_FILE = process.env.AETHERNODE_CONFIG || '/etc/aethernode/config.json';
 const cfg = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'));
 const PANEL = String(cfg.panelUrl).replace(/\/+$/, '');
@@ -26,7 +26,10 @@ catch { try { execFileSync('lxc', ['version'], { stdio: 'ignore', timeout: 10000
 function run(cmd, args, timeoutMs = 120000) {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } }, (err, stdout, stderr) => {
-      resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout: String(stdout || ''), stderr: String(stderr || (err && !stderr ? err.message : '')) });
+      let se = String(stderr || '');
+      if (err && err.killed) se += `\n${cmd} ${args[0] || ''} timed out after ${Math.round(timeoutMs / 60000)} min (no answer from ${cmd})`;
+      else if (err && !se.trim()) se = err.message;
+      resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout: String(stdout || ''), stderr: se });
     });
   });
 }
@@ -292,7 +295,7 @@ const handlers = {
         ...(vm ? [] : ['-c', 'security.nesting=true']), '-c', 'boot.autostart=true', '-c', `user.aether.server=${p.serverId}`];
       const tick = setInterval(() => progress(job.id, 'still working (image download / first boot)...'), 20000);
       try {
-        r = await run(CLI, [...base, '-d', `root,size=${disk}GiB`], 25 * 60000);
+        r = await run(CLI, [...base, '-d', `root,size=${disk}GiB`], img.startsWith('aether/') ? 12 * 60000 : 25 * 60000);
         if (r.code !== 0 && /size|device|root|pool|quota/i.test(r.stderr + r.stdout)) {
           progress(job.id, 'Storage pool does not support a disk size limit - creating without it');
           await run(CLI, ['delete', '--force', p.instanceName], 60000);
@@ -302,6 +305,7 @@ const handlers = {
       if (r.code === 0) break;
       progress(job.id, `${img} failed: ${lastLines(r.stderr || r.stdout)}`);
       await run(CLI, ['delete', '--force', p.instanceName], 60000);
+      if (img.startsWith('aether/')) break; // image already local - images: would fail the same way
     }
     if (r.code !== 0) return { ok: false, error: `create failed: ${lastLines(r.stderr || r.stdout)} (check on the node: ${CLI} list ; ${CLI} network list ; ${CLI} storage list)` };
 

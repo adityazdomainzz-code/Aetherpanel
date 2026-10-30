@@ -39,7 +39,10 @@ function run(cmd: string, args: string[], timeoutMs = 60000): Promise<RunResult>
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } }, (err: any, stdout, stderr) => {
       const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
-      resolve({ code, stdout: String(stdout || ''), stderr: String(stderr || (err && !stderr ? err.message : '')) });
+      let se = String(stderr || '');
+      if (err && err.killed) se += `\n${cmd} ${args[0] || ''} timed out after ${Math.round(timeoutMs / 60000)} min (no answer from ${cmd})`;
+      else if (err && !se.trim()) se = err.message;
+      resolve({ code, stdout: String(stdout || ''), stderr: se });
     });
   });
 }
@@ -214,7 +217,7 @@ async function createInstance(server: Server, v: VpsInfo) {
     for (const img of [...new Set(sources)]) {
       const base = ['launch', img, v.instanceName, ...(v.engine === 'vm' ? ['--vm'] : []), '-c', `limits.memory=${ram}MiB`, '-c', `limits.cpu=${Math.max(1, Math.ceil(cpus))}`,
         ...(v.engine === 'vm' ? [] : ['-c', 'security.nesting=true']), '-c', 'boot.autostart=true'];
-      r = await withHeartbeat(server.id, img.startsWith('aether/') ? `Creating the ${v.engine === 'vm' ? 'VM' : 'container'} from ${img}` : `Downloading ${img} and creating the container (first time takes a few minutes)`, run(cli, [...base, '-d', `root,size=${disk}GiB`], 25 * 60000));
+      r = await withHeartbeat(server.id, img.startsWith('aether/') ? `Creating the ${v.engine === 'vm' ? 'VM' : 'container'} from ${img}` : `Downloading ${img} and creating the container (first time takes a few minutes)`, run(cli, [...base, '-d', `root,size=${disk}GiB`], img.startsWith('aether/') ? 12 * 60000 : 25 * 60000));
       if (r.code !== 0 && /size|device|root|pool|quota/i.test(r.stderr + r.stdout)) {
         await log(server.id, `[AetherVPS/WARN]: Disk size limit not supported by this storage pool - creating without it.`);
         await run(cli, ['delete', '--force', v.instanceName], 60000);
@@ -223,8 +226,10 @@ async function createInstance(server: Server, v: VpsInfo) {
       if (r.code === 0) { v.image = img; break; }
       await log(server.id, `[AetherVPS/WARN]: ${img} failed: ${(r.stderr || r.stdout || 'timeout').trim().split('\n').slice(-2).join(' ')}`);
       await run(cli, ['delete', '--force', v.instanceName], 60000);
+      // the local image is already downloaded - if it fails, images: will fail the same way (and waste 25 more minutes)
+      if (img.startsWith('aether/')) break;
     }
-    if (r.code !== 0) throw new Error(`LXC create failed: ${(r.stderr || r.stdout || 'timed out after 25 minutes').trim().split('\n').slice(-2).join(' ')} - check on the server: ${cli} list ; ${cli} image list ; ${cli} network list`);
+    if (r.code !== 0) throw new Error(`${v.engine === 'vm' ? 'KVM VM' : 'LXC'} create failed: ${(r.stderr || r.stdout || 'timed out after 25 minutes').trim().split('\n').slice(-2).join(' ')} - check on the server: ${cli} operation list ; ${cli} list ; ${cli} storage list`);
     if (cpus < 1 && v.engine !== 'vm') await run(cli, ['config', 'set', v.instanceName, 'limits.cpu.allowance', `${Math.round(cpus * 100)}%`], 20000);
     // server folder -> /root (shift=true maps file owners for unprivileged containers)
     let m = await run(cli, ['config', 'device', 'add', v.instanceName, 'aetherroot', 'disk', `source=${dir}`, 'path=/root', 'shift=true'], 60000);
