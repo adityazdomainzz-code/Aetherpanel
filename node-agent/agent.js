@@ -8,7 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const { execFile, spawn, execFileSync } = require('child_process');
 
-const VERSION = '2.2.1';
+const VERSION = '2.2.2';
 const CFG_FILE = process.env.AETHERNODE_CONFIG || '/etc/aethernode/config.json';
 const cfg = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'));
 const PANEL = String(cfg.panelUrl).replace(/\/+$/, '');
@@ -25,12 +25,14 @@ catch { try { execFileSync('lxc', ['version'], { stdio: 'ignore', timeout: 10000
 // ---------- helpers ----------
 function run(cmd, args, timeoutMs = 120000) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } }, (err, stdout, stderr) => {
+    const child = execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } }, (err, stdout, stderr) => {
       let se = String(stderr || '');
       if (err && err.killed) se += `\n${cmd} ${args[0] || ''} timed out after ${Math.round(timeoutMs / 60000)} min (no answer from ${cmd})`;
       else if (err && !se.trim()) se = err.message;
       resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout: String(stdout || ''), stderr: se });
     });
+    // incus/lxc launch reads YAML config from stdin when it is not a terminal - an open pipe makes it wait for ever
+    try { child.stdin?.end(); } catch {}
   });
 }
 const lastLines = (t, n = 3) => String(t || '').trim().split('\n').slice(-n).join(' ');

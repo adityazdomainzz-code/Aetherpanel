@@ -37,13 +37,15 @@ export const isVpsServer = (s: any): boolean => !!s && (s.productId === 'prod_vp
 interface RunResult { code: number; stdout: string; stderr: string }
 function run(cmd: string, args: string[], timeoutMs = 60000): Promise<RunResult> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } }, (err: any, stdout, stderr) => {
+    const child = execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } }, (err: any, stdout, stderr) => {
       const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
       let se = String(stderr || '');
       if (err && err.killed) se += `\n${cmd} ${args[0] || ''} timed out after ${Math.round(timeoutMs / 60000)} min (no answer from ${cmd})`;
       else if (err && !se.trim()) se = err.message;
       resolve({ code, stdout: String(stdout || ''), stderr: se });
     });
+    // incus/lxc launch reads YAML config from stdin when it is not a terminal - an open pipe makes it wait for ever
+    try { child.stdin?.end(); } catch {}
   });
 }
 async function must(cmd: string, args: string[], timeoutMs?: number): Promise<string> {
