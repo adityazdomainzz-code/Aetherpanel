@@ -8,6 +8,7 @@ import { execFile } from 'child_process';
 import { getDb, saveDbSync } from '../db';
 import { Server } from '../../src/types';
 import { sendNodeJob } from './nodeJobs';
+import { ensureLocalImage } from './vpsImages';
 
 export type VpsEngine = 'docker' | 'lxc' | 'vm';
 
@@ -121,7 +122,7 @@ async function setStatus(server: Server, status: string, extra?: any) {
 // ---------- state ----------
 export async function vpsState(v: VpsInfo): Promise<'running' | 'stopped' | 'missing'> {
   if (isRemoteVps(v)) {
-    const r = await sendNodeJob(v.nodeId!, 'state', { instanceName: v.instanceName }, 30000);
+    const r = await sendNodeJob(v.nodeId!, 'state', { instanceName: v.instanceName, engine: v.engine }, 30000);
     if (!r.ok) throw new Error(r.error || 'node did not answer');
     return (r.data?.state as any) || 'missing';
   }
@@ -167,7 +168,7 @@ async function createInstance(server: Server, v: VpsInfo) {
   const disk = Math.max(1, lim.diskGB || 10);
 
   if (isRemoteVps(v)) {
-    await log(server.id, `[AetherVPS]: Creating ${v.engine === 'vm' ? 'KVM VM' : 'LXC container'} on the connected node (first time downloads the OS image)...`);
+    await log(server.id, `[AetherVPS]: Creating ${v.engine === 'vm' ? 'KVM VM' : v.engine === 'docker' ? 'Docker container' : 'LXC container'} on the connected node (first time downloads the OS image)...`);
     await withHeartbeat(server.id, 'Node is creating the VPS', nodeDo(server, v, 'create', { ram, cpus, disk, setup: SETUP_SCRIPT }, 30 * 60000));
     v.createdAt = new Date().toISOString();
     return;
@@ -206,11 +207,14 @@ async function createInstance(server: Server, v: VpsInfo) {
     const ver = (v.os.match(/ubuntu-(\d+\.\d+)/) || [])[1];
     const sources = [v.image];
     if (cli === 'lxc' && ver) sources.unshift(`ubuntu:${ver}`);
+    const local = await ensureLocalImage(run, cli, v.os, v.engine === 'vm', (l) => { log(server.id, `[AetherVPS]: ${l}`); })
+      .catch((e: any) => { log(server.id, `[AetherVPS/WARN]: image download error: ${e.message}`); return null; });
+    if (local) sources.unshift(local);
     let r: RunResult = { code: 1, stdout: '', stderr: 'no image source' };
     for (const img of [...new Set(sources)]) {
       const base = ['launch', img, v.instanceName, ...(v.engine === 'vm' ? ['--vm'] : []), '-c', `limits.memory=${ram}MiB`, '-c', `limits.cpu=${Math.max(1, Math.ceil(cpus))}`,
         ...(v.engine === 'vm' ? [] : ['-c', 'security.nesting=true']), '-c', 'boot.autostart=true'];
-      r = await withHeartbeat(server.id, `Downloading ${img} and creating the container (first time takes a few minutes)`, run(cli, [...base, '-d', `root,size=${disk}GiB`], 25 * 60000));
+      r = await withHeartbeat(server.id, img.startsWith('aether/') ? `Creating the ${v.engine === 'vm' ? 'VM' : 'container'} from ${img}` : `Downloading ${img} and creating the container (first time takes a few minutes)`, run(cli, [...base, '-d', `root,size=${disk}GiB`], 25 * 60000));
       if (r.code !== 0 && /size|device|root|pool|quota/i.test(r.stderr + r.stdout)) {
         await log(server.id, `[AetherVPS/WARN]: Disk size limit not supported by this storage pool - creating without it.`);
         await run(cli, ['delete', '--force', v.instanceName], 60000);
@@ -427,7 +431,7 @@ export async function initVpsService() {
 
 // ---------- remote nodes: states + stats arrive with the node heartbeat ----------
 const remoteCpu = new Map<string, { ns: number; at: number }>();
-export function applyRemoteVpsStates(nodeId: string, servers: any[], states: { name: string; state: string; cpuNs?: number; memBytes?: number }[]) {
+export function applyRemoteVpsStates(nodeId: string, servers: any[], states: { name: string; state: string; cpuNs?: number; cpuPercent?: number; memBytes?: number }[]) {
   const byName = new Map(states.map((x) => [x.name, x]));
   for (const srv of servers) {
     const v = srv.vps as VpsInfo | undefined;
@@ -442,6 +446,7 @@ export function applyRemoteVpsStates(nodeId: string, servers: any[], states: { n
       const prev = remoteCpu.get(srv.id);
       let cpuPercent = 0;
       if (prev && st.cpuNs && now > prev.at) cpuPercent = +Math.max(0, ((st.cpuNs - prev.ns) / 1e6) / (now - prev.at) * 100).toFixed(1);
+      if (typeof st.cpuPercent === 'number') cpuPercent = +st.cpuPercent.toFixed(1); // docker VPS: node sends % directly
       if (st.cpuNs) remoteCpu.set(srv.id, { ns: st.cpuNs, at: now });
       const ramMB = +((st.memBytes || 0) / 1048576).toFixed(1);
       stats.set(srv.id, { cpuPercent, ramMB, at: now });
