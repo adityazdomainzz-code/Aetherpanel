@@ -1,4 +1,5 @@
 import { destroyVps } from '../services/vpsService';
+import { removeServerDns } from '../services/cloudflareService';
 import { Router, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -2329,6 +2330,7 @@ router.delete('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Res
 
   // Clean filesystem directory
   await destroyVps(server).catch(() => {});
+  await removeServerDns(server);
   const serverDir = getServerDir(server.id);
   if (fs.existsSync(serverDir)) {
     try {

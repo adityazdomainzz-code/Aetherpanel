@@ -1,4 +1,5 @@
 import { VPS_OS, buildVpsInfo, detectVpsEngines } from '../services/vpsService';
+import { assertMinecraftNameAvailable, registerMinecraftDns } from '../services/cloudflareService';
 import { Router, Response } from 'express';
 import { getDb, saveDbSync } from '../db';
 import { authMiddleware, AuthenticatedRequest, createAuditLog } from '../auth';
@@ -134,6 +135,9 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     throw new Error(`The plan '${plan.name}' is a ${nice(category)} plan, not ${nice(wantCat)}. Pick a ${nice(wantCat)} plan (Admin -> Products & Plans).`);
   }
 
+  // Minecraft + Cloudflare connected: the server name becomes <name>.<domain> - it must be free
+  if (category === 'minecraft') await assertMinecraftNameAvailable(db, name);
+
   // ---- VPS plan: pick engine + OS and make sure the engine exists before any credits are taken
   const isVps = category === 'vps' || plan.productId === 'prod_vps';
   let vpsEngine: 'docker' | 'lxc' | 'vm' = 'docker';
@@ -147,7 +151,6 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
     if (asked && asked.id !== 'node_local' && !asked.isLocalNode) {
       vpsRemoteNode = asked; // VPS on a connected node (install.sh -> Make this VPS a node)
       if (asked.status !== 'online') throw new Error(`Node '${asked.name}' is offline - check on the node: systemctl status aethernode`);
-      if (vpsEngine === 'docker') vpsEngine = 'lxc';
       if (vpsEngine === 'vm' && asked.capabilities && !asked.capabilities.kvm) throw new Error(`Node '${asked.name}' has no KVM - choose an LXC container.`);
     }
   }
@@ -432,6 +435,7 @@ export async function executeServerDeployment(db: any, userId: string, payload: 
   }
 
   saveDbSync();
+  if (category === 'minecraft') registerMinecraftDns(serverId).catch(() => {}); // <name>.<domain> on Cloudflare
 
   await createAuditLog(
     freshUser.id, freshUser.email, freshUser.role,

@@ -1,4 +1,5 @@
 import { destroyVps, buildVpsInfo, detectVpsEngines, VPS_OS } from '../services/vpsService';
+import { verifyTokenAndListZones, getCloudflareSettings, cloudflareActive, assertMinecraftNameAvailable, subdomainFor, CloudflareError, registerMinecraftDns, removeServerDns } from '../services/cloudflareService';
 import fs from 'fs';
 import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
@@ -419,6 +420,7 @@ router.delete('/users/:id', async (req: AuthenticatedRequest, res: Response) => 
     clearConsoleBuffer(srv.id);
     closeServerConsoleClients(srv.id, `Server deleted via user account termination.`);
     await destroyVps(srv).catch(() => {});
+    await removeServerDns(srv);
     const serverDir = getServerDir(srv.id);
     if (fs.existsSync(serverDir)) {
       try {
@@ -1170,6 +1172,86 @@ router.post('/nodes/:id/allocations/bulk-delete', async (req: AuthenticatedReque
   });
 });
 
+// --- CLOUDFLARE DNS (auto address for Minecraft servers) ---
+const cfPublic = (db: any) => {
+  const s = getCloudflareSettings(db);
+  return s ? { connected: true, enabled: !!s.enabled, zoneId: s.zoneId, zoneName: s.zoneName, targetIp: s.targetIp || '', tokenHint: `••••${String(s.apiToken).slice(-4)}`, connectedAt: s.connectedAt } : { connected: false, enabled: false };
+};
+const cfFail = (res: Response, e: any) => res.status(e instanceof CloudflareError && e.code === 'NAME_TAKEN' ? 409 : 400).json({ success: false, error: { code: e.code || 'CLOUDFLARE_ERROR', message: e.message } });
+
+// GET /api/v1/admin/cloudflare
+router.get('/cloudflare', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
+  const db = await getDb();
+  res.json({ success: true, data: cfPublic(db) });
+});
+
+// POST /api/v1/admin/cloudflare/connect {apiToken} -> verifies the token, returns the domains it can edit
+router.post('/cloudflare/connect', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = await getDb();
+    const token = String(req.body?.apiToken || '').trim() || getCloudflareSettings(db)?.apiToken || '';
+    const zones = await verifyTokenAndListZones(token);
+    const old = getCloudflareSettings(db);
+    (db.settings as any).cloudflare = { enabled: old?.enabled ?? false, zoneId: old?.zoneId || '', zoneName: old?.zoneName || '', targetIp: old?.targetIp || '', ...(old || {}), apiToken: token, connectedAt: new Date().toISOString() };
+    saveDbSync();
+    await createAuditLog(req.user!.id, req.user!.email, req.user!.role, 'CLOUDFLARE_CONNECT', 'cloudflare', `Connected Cloudflare (${zones.length} domains)`);
+    res.json({ success: true, data: { ...cfPublic(db), zones } });
+  } catch (e: any) { cfFail(res, e); }
+});
+
+// GET /api/v1/admin/cloudflare/zones - domains the saved token can edit
+router.get('/cloudflare/zones', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = await getDb();
+    const s = getCloudflareSettings(db);
+    if (!s) return res.json({ success: true, data: [] });
+    res.json({ success: true, data: await verifyTokenAndListZones(s.apiToken) });
+  } catch (e: any) { cfFail(res, e); }
+});
+
+// PUT /api/v1/admin/cloudflare {zoneId, zoneName, enabled, targetIp}
+router.put('/cloudflare', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
+  const db = await getDb();
+  const s: any = getCloudflareSettings(db);
+  if (!s) return res.status(400).json({ success: false, error: { code: 'NOT_CONNECTED', message: 'Connect Cloudflare first.' } });
+  const { zoneId, zoneName, enabled, targetIp } = req.body || {};
+  if (typeof zoneId === 'string' && zoneId) { s.zoneId = zoneId; s.zoneName = String(zoneName || '').trim().toLowerCase(); }
+  if (typeof enabled === 'boolean') s.enabled = enabled;
+  if (typeof targetIp === 'string') {
+    const ip = targetIp.trim();
+    if (ip && !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip) && !ip.includes(':') && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(ip)) {
+      return res.status(400).json({ success: false, error: { code: 'BAD_IP', message: 'Public IP must be an IPv4, IPv6 or hostname.' } });
+    }
+    s.targetIp = ip;
+  }
+  if (s.enabled && (!s.zoneId || !s.zoneName)) return res.status(400).json({ success: false, error: { code: 'NO_ZONE', message: 'Select a domain first.' } });
+  saveDbSync();
+  await createAuditLog(req.user!.id, req.user!.email, req.user!.role, 'CLOUDFLARE_UPDATE', 'cloudflare', `Cloudflare DNS ${s.enabled ? 'enabled' : 'disabled'} for ${s.zoneName || '-'}`);
+  res.json({ success: true, data: cfPublic(db) });
+});
+
+// POST /api/v1/admin/cloudflare/disconnect
+router.post('/cloudflare/disconnect', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
+  const db = await getDb();
+  delete (db.settings as any).cloudflare;
+  saveDbSync();
+  await createAuditLog(req.user!.id, req.user!.email, req.user!.role, 'CLOUDFLARE_DISCONNECT', 'cloudflare', 'Disconnected Cloudflare');
+  res.json({ success: true, data: { connected: false, enabled: false } });
+});
+
+// GET /api/v1/admin/cloudflare/check-name?name=  -> {available, hostname}
+router.get('/cloudflare/check-name', requireRole(ADMIN_ROLES as any), async (req: AuthenticatedRequest, res: Response) => {
+  const db = await getDb();
+  if (!cloudflareActive(db)) return res.json({ success: true, data: { active: false } });
+  try {
+    const hostname = await assertMinecraftNameAvailable(db, String(req.query.name || ''));
+    res.json({ success: true, data: { active: true, available: true, hostname } });
+  } catch (e: any) {
+    const s = getCloudflareSettings(db)!;
+    res.json({ success: true, data: { active: true, available: false, hostname: `${subdomainFor(String(req.query.name || ''))}.${s.zoneName}`, message: e.message } });
+  }
+});
+
 // --- ALL SERVERS ---
 // POST /api/v1/admin/servers/create - Admin provision custom server for user with custom specs
 // Only admins create servers. With a planId the plan price is taken from the user's credits;
@@ -1245,7 +1327,6 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
     return res.status(404).json({ success: false, error: { code: 'NODE_NOT_FOUND', message: 'That node does not exist.' } });
   }
   if (remoteVpsNode) {
-    if (vpsEngine === 'docker') return res.status(400).json({ success: false, error: { code: 'VPS_ENGINE', message: 'Connected nodes run LXC containers or KVM VMs - Docker is only for the panel machine.' } });
     if (remoteVpsNode.status !== 'online') return res.status(400).json({ success: false, error: { code: 'NODE_OFFLINE', message: `Node '${remoteVpsNode.name}' is offline - check on the node: systemctl status aethernode` } });
     if (vpsEngine === 'vm' && remoteVpsNode.capabilities && !remoteVpsNode.capabilities.kvm) return res.status(400).json({ success: false, error: { code: 'NO_KVM', message: `Node '${remoteVpsNode.name}' has no KVM - choose LXC container.` } });
   } else if (isVps) {
@@ -1259,6 +1340,9 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
     if (vpsEngine === 'vm' && !fs.existsSync('/dev/kvm')) {
       return res.status(400).json({ success: false, error: { code: 'NO_KVM', message: 'The panel machine has no KVM (/dev/kvm) - choose LXC container.' } });
     }
+  }
+  if (category === 'minecraft') {
+    try { await assertMinecraftNameAvailable(db, name); } catch (e: any) { return cfFail(res, e); }
   }
   // No capacity limits here: any node is fine; fall back to the panel's own node so creation never fails for "no capacity"
   const targetNode = isVps
@@ -1399,6 +1483,7 @@ router.post('/servers/create', requireRole(ADMIN_ROLES as any), async (req: Auth
     }
     p.initializeServerFiles(serverId, category, resolvedSoftware);
     if (category === 'minecraft') {
+      registerMinecraftDns(serverId).catch(() => {});
       p.appendConsoleLog(serverId, `[AetherPanel]: Admin provisioned Minecraft server (${resolvedSoftware} ${resolvedVersion}) with custom specs...`);
       import('../minecraftService').then(mc => {
         mc.writeMinecraftEula(serverId, true);
@@ -1452,6 +1537,7 @@ router.delete('/servers/:id', async (req: AuthenticatedRequest, res: Response) =
 
   // 3. Remove filesystem directory recursively
   await destroyVps(server).catch(() => {});
+  await removeServerDns(server);
   const serverDir = getServerDir(server.id);
   if (fs.existsSync(serverDir)) {
     try {
@@ -1634,6 +1720,7 @@ router.post('/servers/bulk-delete', async (req: AuthenticatedRequest, res: Respo
 
       // 3. Remove filesystem directory recursively
       await destroyVps(server).catch(() => {});
+      await removeServerDns(server);
       const serverDir = getServerDir(server.id);
       if (fs.existsSync(serverDir)) {
         try {

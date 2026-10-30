@@ -30,6 +30,8 @@ export const AdminServers: React.FC = () => {
   const [createCategory, setCreateCategory] = useState<'minecraft' | 'bot' | 'vps'>('minecraft');
   const [vpsEngine, setVpsEngine] = useState<'docker' | 'lxc' | 'vm'>('docker');
   const [vpsNodeId, setVpsNodeId] = useState('');
+  // Cloudflare: Minecraft server name -> <name>.<domain>, must be free
+  const [nameCheck, setNameCheck] = useState<{ active: boolean; available?: boolean; hostname?: string; message?: string } | null>(null);
   const [allNodes, setAllNodes] = useState<any[]>([]);
   const [vpsOs, setVpsOs] = useState('ubuntu-22.04');
   const [createSoftware, setCreateSoftware] = useState('Paper');
@@ -63,6 +65,15 @@ export const AdminServers: React.FC = () => {
   const openCreateModal = () => { setCreateError(null); setShowCreateModal(true); loadCreateData(); };
 
   const selectedUser = allUsers.find((u) => u.id === selectedUserId) || null;
+
+  useEffect(() => {
+    if (!showCreateModal || createCategory !== 'minecraft' || !createServerName.trim()) { setNameCheck(null); return; }
+    const t = setTimeout(async () => {
+      const r = await apiRequest<any>(`/admin/cloudflare/check-name?name=${encodeURIComponent(createServerName.trim())}`);
+      setNameCheck(r.success && r.data ? r.data : null);
+    }, 450);
+    return () => clearTimeout(t);
+  }, [createServerName, createCategory, showCreateModal]);
   const filteredUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
     const list = q ? allUsers.filter((u) => [u.email, u.username, u.displayName, u.id].some((v) => String(v || '').toLowerCase().includes(q))) : allUsers;
@@ -769,8 +780,13 @@ export const AdminServers: React.FC = () => {
                   value={createServerName}
                   onChange={(e) => setCreateServerName(e.target.value)}
                   placeholder="Survival SMP / Bot Instance"
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-amber-500"
+                  className={`w-full bg-zinc-950 border rounded-xl px-3.5 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-amber-500 ${nameCheck && !nameCheck.available ? 'border-red-500/60' : 'border-zinc-800'}`}
                 />
+                {createCategory === 'minecraft' && nameCheck?.active && (
+                  <p className={`text-[11px] mt-1 ${nameCheck.available ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {nameCheck.available ? `✓ Address: ${nameCheck.hostname}` : `✗ ${nameCheck.message || 'Server name already exists'}`}
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -807,7 +823,7 @@ export const AdminServers: React.FC = () => {
                       onChange={(e) => setVpsEngine(e.target.value as 'docker' | 'lxc' | 'vm')}
                       className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
                     >
-                      {!vpsNodeId && <option value="docker">Docker container</option>}
+                      <option value="docker">Docker container</option>
                       <option value="lxc">LXC / Incus container</option>
                       <option value="vm">KVM virtual machine</option>
                     </select>
@@ -853,7 +869,7 @@ export const AdminServers: React.FC = () => {
                 <label className="block text-xs font-medium text-zinc-300 mb-1">Node</label>
                 <select
                   value={vpsNodeId}
-                  onChange={(e) => { setVpsNodeId(e.target.value); if (e.target.value && vpsEngine === 'docker') setVpsEngine('lxc'); }}
+                  onChange={(e) => setVpsNodeId(e.target.value)}
                   className="w-full mb-3 bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-amber-500"
                 >
                   <option value="">This panel machine</option>
@@ -876,7 +892,7 @@ export const AdminServers: React.FC = () => {
                 </select>
                 <p className="text-[10px] text-zinc-500 mt-1">
                   {vpsNodeId
-                    ? 'Runs on the connected node (Incus). Add nodes with install.sh -> "Connect another Node" on the panel machine.'
+                    ? (vpsEngine === 'docker' ? 'Runs on the connected node with Docker (Docker must be installed on the node).' : 'Runs on the connected node (Incus). Add nodes with install.sh -> "Connect another Node" on the panel machine.')
                     : <>Runs on this panel machine - {vpsEngine === 'docker' ? 'Docker must be installed (curl -fsSL https://get.docker.com | sh).' : 'Incus/LXC must be installed and initialised (incus admin init --minimal).'} The VPS /root folder is the File Manager.</>}
                 </p>
               </div>

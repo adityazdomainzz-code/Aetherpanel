@@ -7,11 +7,12 @@ import {
   Database, Plus, Trash2, Edit3, X, Disc as DiscordIcon, Twitter, Github, Share2, Coins
 } from 'lucide-react';
 import { apiRequest } from '../../lib/api';
+import { CloudflareDnsSettings } from '../../components/admin/CloudflareDnsSettings';
 import { useBranding } from '../../lib/BrandingContext';
 import { Order, PaymentGatewaySettings, PanelVersionInfo, UpdateJobState, AuthProviderSettings, DatabaseHost, SocialLinks, NetworkProtectionStatus } from '../../types';
 
 export const AdminSettings: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'general' | 'auth' | 'security' | 'payments' | 'pending' | 'updates' | 'network_sftp' | 'databases' | 'network_protection'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'auth' | 'security' | 'payments' | 'pending' | 'updates' | 'network_sftp' | 'databases' | 'network_protection' | 'cloudflare'>('general');
 
   // Network Protection States
   const [netProtectStatus, setNetProtectStatus] = useState<NetworkProtectionStatus | null>(null);
@@ -735,6 +736,12 @@ export const AdminSettings: React.FC = () => {
             className={`px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 relative ${activeTab === 'network_protection' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'}`}
           >
             <ShieldCheck className="h-3.5 w-3.5 text-amber-400" /> Network Protection
+          </button>
+          <button
+            onClick={() => setActiveTab('cloudflare')}
+            className={`px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 relative ${activeTab === 'cloudflare' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white'}`}
+          >
+            <Globe className="h-3.5 w-3.5 text-orange-400" /> Cloudflare DNS
           </button>
           <button
             onClick={() => { setActiveTab('databases'); fetchDatabaseHosts(); }}
@@ -1776,6 +1783,8 @@ export const AdminSettings: React.FC = () => {
       )}
 
       {/* TAB 4: Updates & System Version */}
+      {activeTab === 'cloudflare' && <CloudflareDnsSettings />}
+
       {activeTab === 'updates' && (
         <div className="space-y-6">
           <div className="p-6 rounded-3xl bg-zinc-900 border border-zinc-800 space-y-4">

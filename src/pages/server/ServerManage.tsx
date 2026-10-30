@@ -1246,6 +1246,8 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
   }
 
   const fullIp = (server.productId === 'prod_vps' || (server as any).vps) ? (server.primaryIp || '127.0.0.1') : `${server.primaryIp || '127.0.0.1'}:${server.primaryPort || 25565}`;
+  const dnsHost: string | undefined = (server as any).dns?.hostname;
+  const shownAddress = dnsHost || fullIp;
   const isRunning = server.status === 'running';
   const swLower = typeof server.software === 'string' ? server.software.toLowerCase() : '';
   const isVps = serverIsVps;
@@ -1356,9 +1358,9 @@ export const ServerManage: React.FC<ServerManageProps> = ({ serverId, initialTab
           {/* IP & Power Action Buttons */}
           <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
             <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-950/90 border border-zinc-800 text-xs font-mono text-zinc-300 shadow-inner max-w-full truncate">
-              <span className="truncate">IP: <strong className="text-white font-mono">{fullIp}</strong></span>
+              <span className="truncate" title={dnsHost ? `Cloudflare DNS → ${fullIp}` : undefined}>{dnsHost ? 'Address' : 'IP'}: <strong className="text-white font-mono">{shownAddress}</strong></span>
               <button
-                onClick={() => handleCopy(fullIp)}
+                onClick={() => handleCopy(shownAddress)}
                 className="p-1 hover:text-white text-zinc-400 transition-colors shrink-0"
                 title="Copy Server IP"
               >
