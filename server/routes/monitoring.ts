@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
 import { getDb, saveDbSync } from '../db';
 import { authMiddleware, AuthenticatedRequest, createAuditLog } from '../auth';
 import { AlertRule, AlertIncident, TelemetryPoint, Node, Server } from '../../src/types';
@@ -24,33 +24,52 @@ const serverTelemetryBuffer: Record<string, TelemetryPoint[]> = {};
 /**
  * Accurately measures the real disk usage of a server's directory on disk in bytes.
  */
+const diskCache = new Map<string, { bytes: number; at: number; busy: boolean }>();
+function walkDirAsyncBytes(dir: string): Promise<number> {
+  // "du" runs in its own process - the old synchronous walk froze the whole panel on big servers / VPS folders
+  return new Promise((resolve) => {
+    execFile('du', ['-sb', dir], { timeout: 120000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      const n = parseInt(String(stdout || '').trim().split(/\s+/)[0], 10);
+      if (!isNaN(n)) return resolve(n);
+      // no "du" (or it failed) - async walk that never blocks the event loop
+      (async () => {
+        let total = 0;
+        const stack = [dir];
+        while (stack.length) {
+          const cur = stack.pop()!;
+          let entries: fs.Dirent[] = [];
+          try { entries = await fs.promises.readdir(cur, { withFileTypes: true }); } catch { continue; }
+          for (const e of entries) {
+            const full = path.join(cur, e.name);
+            if (e.isDirectory()) stack.push(full);
+            else if (e.isFile()) { try { total += (await fs.promises.stat(full)).size; } catch {} }
+          }
+        }
+        resolve(total);
+      })().catch(() => resolve(0));
+    });
+  });
+}
+
+/** last known disk usage of a server folder; refreshed in the background (max once per 60s), never blocks */
 export function getRealServerDiskUsageBytes(serverId: string): number {
   const dir = path.join(process.cwd(), 'data', 'servers', serverId);
-  if (!fs.existsSync(dir)) return 0;
-  let totalBytes = 0;
-  function walk(currentDir: string) {
-    try {
-      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-      for (const entry of entries) {
-        const full = path.join(currentDir, entry.name);
-        if (entry.isDirectory()) {
-          walk(full);
-        } else if (entry.isFile()) {
-          try {
-            totalBytes += fs.statSync(full).size;
-          } catch {}
-        }
-      }
-    } catch {}
+  let e = diskCache.get(serverId);
+  if (!e) { e = { bytes: 0, at: 0, busy: false }; diskCache.set(serverId, e); }
+  const entry = e;
+  if (!entry.busy && Date.now() - entry.at > 60000) {
+    entry.busy = true;
+    if (!fs.existsSync(dir)) { entry.bytes = 0; entry.at = Date.now(); entry.busy = false; }
+    else walkDirAsyncBytes(dir).then((b) => { entry.bytes = b; entry.at = Date.now(); }).finally(() => { entry.busy = false; });
   }
-  walk(dir);
-  return totalBytes;
+  return entry.bytes;
 }
 
 /**
  * Inspects the real running Linux process (via /proc/[pid]/status & ps)
  * to return actual memory RSS (in MB) and CPU utilization (in %).
  */
+const cpuSamples = new Map<number, { ticks: number; at: number }>();
 export function getRealProcessStats(pid?: number): { cpuPercent: number; usedRamMB: number } | null {
   if (!pid || pid <= 0) return null;
   try {
@@ -69,12 +88,14 @@ export function getRealProcessStats(pid?: number): { cpuPercent: number; usedRam
     }
 
     let cpuPercent = 0.0;
-    try {
-      const psOut = execSync(`ps -p ${pid} -o %cpu --no-headers`, { encoding: 'utf8', timeout: 600 }).trim();
-      const parsedCpu = parseFloat(psOut);
-      if (!isNaN(parsedCpu)) {
-        cpuPercent = +parsedCpu.toFixed(1);
-      }
+    try { // from /proc/<pid>/stat deltas - no "ps" process per request
+      const f = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const parts = f.slice(f.lastIndexOf(')') + 2).split(' ');
+      const ticks = Number(parts[11]) + Number(parts[12]); // utime + stime
+      const now = Date.now();
+      const prev = cpuSamples.get(pid);
+      cpuSamples.set(pid, { ticks, at: now });
+      if (prev && now > prev.at) cpuPercent = +Math.max(0, ((ticks - prev.ticks) / 100) / ((now - prev.at) / 1000) * 100).toFixed(1);
     } catch {}
 
     return { cpuPercent, usedRamMB };

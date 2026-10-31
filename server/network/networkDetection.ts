@@ -73,7 +73,20 @@ export function getLocalIPv4s(): string[] {
 /**
  * Resolves the public IPv4 address using multiple authoritative lookup API services with redundant fallbacks.
  */
+let publicIpCache: { at: number; ip: string | null } | null = null;
+let publicIpPending: Promise<string | null> | null = null;
+/** public IP rarely changes - cached for 10 minutes (lookup can take several seconds) */
 export function fetchPublicIP(): Promise<string | null> {
+  if (publicIpCache && Date.now() - publicIpCache.at < (publicIpCache.ip ? 600000 : 60000)) return Promise.resolve(publicIpCache.ip);
+  if (!publicIpPending) {
+    publicIpPending = fetchPublicIPFresh()
+      .then((ip) => { publicIpCache = { at: Date.now(), ip }; return ip; })
+      .finally(() => { publicIpPending = null; });
+  }
+  return publicIpCache ? Promise.resolve(publicIpCache.ip) : publicIpPending;
+}
+
+function fetchPublicIPFresh(): Promise<string | null> {
   const services = [
     'https://api.ipify.org',
     'https://icanhazip.com',

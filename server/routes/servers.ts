@@ -1,3 +1,4 @@
+import { swr } from '../utils/swrCache';
 import { destroyVps } from '../services/vpsService';
 import { removeServerDns } from '../services/cloudflareService';
 import { Router, Response } from 'express';
@@ -180,7 +181,7 @@ router.get('/:id', authMiddleware, requireApiKeyScope('servers:read'), async (re
   const plan = db.plans.find(p => p.id === server.planId);
   const sftp = await resolveServerSftpInfo(server.id, req.get('host'));
 
-  const playitStatus = node ? await getNodePlayitStatus(node.id).catch(() => null) : null;
+  const playitStatus = node ? await swr(`playit:${node.id}`, 20000, () => getNodePlayitStatus(node.id)).catch(() => null) : null;
   const publicEndpoint = resolveServerPublicEndpoint(server, node, playitStatus);
 
   const isSubuser = server.userId !== req.user!.id;

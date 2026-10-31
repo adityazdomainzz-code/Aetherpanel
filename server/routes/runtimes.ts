@@ -53,8 +53,12 @@ export function isValidRuntimeVersion(software: string, version: string): boolea
 }
 
 // GET /api/v1/runtimes
+// verifyRuntimeExecutables() runs several "--version" processes synchronously (freezes the panel) - cache it
+let verifiedCache: { at: number; v: ReturnType<typeof verifyRuntimeExecutables> } | null = null;
+setTimeout(() => { try { if (!verifiedCache) verifiedCache = { at: Date.now(), v: verifyRuntimeExecutables() }; } catch {} }, 8000).unref?.();
 router.get('/', (req: Request, res: Response) => {
-  const verified = verifyRuntimeExecutables();
+  if (!verifiedCache || Date.now() - verifiedCache.at > 5 * 60000) verifiedCache = { at: Date.now(), v: verifyRuntimeExecutables() };
+  const verified = verifiedCache.v;
   
   res.json({
     success: true,

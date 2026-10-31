@@ -283,9 +283,16 @@ router.post('/:id/reinstall', authMiddleware, async (req: AuthenticatedRequest, 
 });
 
 // GET /api/v1/minecraft/java-runtimes - Query discovered Java runtimes
+// discoverJavaBinaries() runs "java -version" for every java it finds, synchronously - cache it
+let javaRuntimesCache: { at: number; v: ReturnType<typeof discoverJavaBinaries>; progress: string } | null = null;
+setTimeout(() => { try { if (!javaRuntimesCache) javaRuntimesCache = { at: Date.now(), v: discoverJavaBinaries(), progress: JSON.stringify(javaInstallProgress || null) }; } catch {} }, 10000).unref?.();
 router.get('/java-runtimes', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const runtimes = discoverJavaBinaries();
+    const progress = JSON.stringify(javaInstallProgress || null); // an install changed something -> rescan
+    if (!javaRuntimesCache || javaRuntimesCache.progress !== progress || Date.now() - javaRuntimesCache.at > 60000) {
+      javaRuntimesCache = { at: Date.now(), v: discoverJavaBinaries(), progress };
+    }
+    const runtimes = javaRuntimesCache.v;
     res.json({
       success: true,
       data: runtimes

@@ -2,6 +2,7 @@ import { Node, Server, SftpConnectionInfo } from '../src/types';
 import { getDb } from './db';
 import { runNetworkDiagnostics, checkPortReachable, isPrivateIP } from './network/networkDetection';
 import { getNodePlayitStatus } from './playit/playitService';
+import { swr } from './utils/swrCache';
 import { isInternalAddress, isValidFQDN, isValidIPv4, NO_EXTERNAL_ENDPOINT } from './network/endpointResolver';
 
 export { isInternalAddress };
@@ -178,7 +179,8 @@ export async function resolveServerSftpInfo(
   const sftpPassword = (server as any)?.sftpPassword || '••••••••••••••••';
 
   const nodeId = node?.id || 'node_local';
-  const modeDetails = await resolveNodeSftpMode(nodeId);
+  // cached: the full check (public IP lookup + port probes) takes seconds and used to block every server page load
+  const modeDetails = await swr(`sftpmode:${nodeId}`, 60000, () => resolveNodeSftpMode(nodeId));
 
   let host = '';
   let port = node?.sftpPort || 2022;
@@ -240,3 +242,11 @@ export async function resolveServerSftpInfo(
   };
 }
 
+
+// warm the cache after start so even the first server page opens fast
+setTimeout(async () => {
+  try {
+    const db = await getDb();
+    for (const n of db.nodes || []) swr(`sftpmode:${n.id}`, 60000, () => resolveNodeSftpMode(n.id)).catch(() => {});
+  } catch {}
+}, 4000).unref?.();
